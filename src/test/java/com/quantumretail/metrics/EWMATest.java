@@ -1,5 +1,6 @@
-package com.quantumretail;
+package com.quantumretail.metrics;
 
+import com.quantumretail.metrics.EWMA;
 import org.junit.Test;
 
 import java.util.concurrent.TimeUnit;

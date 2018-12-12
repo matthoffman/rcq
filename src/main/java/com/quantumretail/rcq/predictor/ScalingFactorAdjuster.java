@@ -1,6 +1,6 @@
 package com.quantumretail.rcq.predictor;
 
-import com.quantumretail.EWMA;
+import com.quantumretail.metrics.EWMA;
 import com.quantumretail.resourcemon.ResourceMonitor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;

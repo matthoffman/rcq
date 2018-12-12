@@ -1,6 +1,6 @@
 package com.quantumretail.resourcemon;
 
-import com.quantumretail.EWMA;
+import com.quantumretail.metrics.EWMA;
 import org.junit.Test;
 
 import java.util.Map;

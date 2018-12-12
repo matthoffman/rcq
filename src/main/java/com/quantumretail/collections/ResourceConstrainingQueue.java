@@ -1,6 +1,6 @@
 package com.quantumretail.collections;
 
-import com.quantumretail.MetricsAware;
+import com.quantumretail.metrics.MetricsAware;
 import com.quantumretail.constraint.ConstraintStrategies;
 import com.quantumretail.constraint.ConstraintStrategy;
 import com.quantumretail.rcq.predictor.TaskTracker;
@@ -12,17 +12,44 @@ import org.slf4j.LoggerFactory;
 import java.lang.reflect.Method;
 import java.util.Collection;
 import java.util.Iterator;
+import java.util.NoSuchElementException;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
- * Note that this resource-constraining behavior ONLY occurs on {@link #poll()} and {@link #remove()}. Other access methods
- * like {@link #peek()}, {@link #iterator()}, {@link #toArray()}, and so on will bypass the resource-constraining behavior.
+ * Note that this resource-constraining behavior ONLY occurs on {@link #poll()}a, {@link #take()} and {@link #remove()}.
+ * Other access methods like {@link #peek()}, {@link #iterator()}, {@link #toArray()}, and so on will bypass the
+ * resource-constraining behavior.
  * <p/>
  *
- * If strict = true, we'll use blocking in remove(), poll() and take(). Otherwise, we'll use a non-blocking (but
- * slightly less accurate) behavior.
+ * Concurrency note:
+ * There are several important concurrency-related issues to keep in mind when using ResourceConstrainingQueue.
+ *
+ * First and foremost, this implementation relies on {@link #peek()} to check if we have resources available to execute
+ * the next task, without actually claiming that next task. Therefore it assumes that a peek() and a subsequent poll()
+ * will return the same object. Of course, with multiple readers, this may well not be the case. Therefore, by default,
+ * we have a global lock on reads:  each poll(), remove() or take() operation locks to try to ensure that a subsequent
+ * peek() and take() returns the same object.
+ * Three things to note about this implementation:
+ *  1. If there are other consumers of the underlying queue other than this class, peek() and poll() may return
+ *  different objects and we may return items we do not have the resources to handle.
+ *  2. If the underlying queue implementation is distributed, such that there are multiple readers on this queue on
+ *  different JVMs, the same applies: we may return items that we do not have the resources to handle.
+ *  3. Since peek() is non-blocking, blocking calls (peek(),
+ *
+ * In practice, this is only an issue if the subsequent items vary widely in their resource needs, but it's important
+ * to be aware of.
+ *
+ * If strict == false in the constructor, we will *not* lock on reads. That means that two concurrent reads can return
+ * two items, without ever checking to see if we have the resources available for the second item explicitly (the first
+ * item will be checked twice instead).
+ * In some cases, that might be preferable to locking: if resources are generally homogeneous, and high throughput is
+ * important, the cost of occasionally checking the wrong task may be acceptable. However, strict is "true" by default.
+ *
+ * Track https://github.com/matthoffman/rcq/issues/1 for another alternative implementation with different correctness
+ * guarantees that doesn't rely on peek().
+ *
  */
 public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAware {
     private static final Logger log = LoggerFactory.getLogger(ResourceConstrainingQueue.class);
@@ -33,7 +60,7 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
 
     private boolean failAfterAttemptThresholdReached = false;
 
-    protected static final long DEFAULT_POLL_FREQ = 100L;
+    public static final long DEFAULT_POLL_FREQ = 100L;
     //the default will try for 10 mins  (default poll freq = 100L)
     protected static final long DEFAULT_CONSTRAINED_ITEM_THRESHOLD = (10 * 60 * 1000) / DEFAULT_POLL_FREQ;
 
@@ -66,7 +93,6 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
     public ResourceConstrainingQueue(BlockingQueue<T> delegate, TaskTracker<T> taskTracker, long defaultPollFreq) {
         this(delegate, ConstraintStrategies.defaultConstraintStrategy(taskTracker), defaultPollFreq, true, taskTracker);
     }
-
 
     public ResourceConstrainingQueue(BlockingQueue<T> delegate, ConstraintStrategy<T> constraintStrategy, long retryFrequencyMS, boolean strict) {
         this(delegate, constraintStrategy, retryFrequencyMS, strict, null);
@@ -124,41 +150,40 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
     }
 
     /**
-     * Note that this is an approximation, and as such, we take some liberties in regards accuracy when called from
-     * multiple threads.
-     * In particular:
-     * <p/>
-     * This implementation will do a peek, see if we have resource for the task at the head of the queue, and if so,
-     * call delegate.remove() and return the result. That means that if two threads call this at the very same time,
-     * they'll both check to see if we have resources for the same task (the one at the front of the queue) but they will
-     * then return the first and then second task in the queue -- but neither thread will have checked to see if we have
-     * resources for that second task!
-     * We could fix this by doing something more accurate here, but since we don't have an atomic "compareAndGet" type
-     * of operation from the underlying queue, we may need to resort to blocking. Currently, we're preferring speed over
-     * complete accuracy here. In the face of multiple concurrent calls, the checks we're doing aren't accurate anyway.
+     * Retrieves and removes the head of this queue.  This method differs
+     * from {@link #poll poll} only in that it throws an exception if this
+     * queue is empty.
      *
-     * @return
+     * See the concurrency notes in the class-level javadoc for important notes about the accuracy and threadsafety of
+     * this method.
+     *
+     * @return the head of this queue
+     * @throws NoSuchElementException if this queue is empty
+     * @throws InsufficientResourcesException if we do not have sufficient resources for the next element
      */
     @Override
     public T remove() {
-        while (true) {
-            boolean locking = shouldLock();
-            try {
-                if (locking) {
-                    takeLock.lock();
-                }
-                T nextItem = delegate.peek();
-                if (nextItem == null || shouldReturn(nextItem)) {
-                    // Note that we might be returning a *different item* than nextItem if we have multiple threads accessing this concurrently!
-                    // We're intentionally taking that risk to avoid locking.
-                    return trackIfNecessary(delegate.remove());
-                } else {
-                    return null; // sleep? block?
-                }
-            } finally {
-                if (locking) {
-                    takeLock.unlock();
-                }
+        boolean locking = shouldLock();
+        try {
+            if (locking) {
+                // java 1.7+ note: synchronized(obj) and StripedLock are both more efficient than ReentrantLock for
+                // most cases, but using ReentrantLock makes the "optionally strict" logic much simpler, and the
+                // differences are not significant in this application.
+                takeLock.lock();
+            }
+            T nextItem = delegate.peek();
+            if (nextItem == null || shouldReturn(nextItem)) {
+                // note that if nextItem == null, remove() here will throw an exception.
+                // Note that we might be returning a *different item* than nextItem if we have multiple threads
+                // accessing this concurrently and strict == false!
+                // When strict == false, we're intentionally taking that risk to avoid locking.
+                return trackIfNecessary(delegate.remove());
+            } else {
+                throw new InsufficientResourcesException();
+            }
+        } finally {
+            if (locking) {
+                takeLock.unlock();
             }
         }
     }
@@ -182,18 +207,11 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
 
 
     /**
-     * Note that this is an approximation, and as such, we take some liberties in regards accuracy when called from
-     * multiple threads.
-     * In particular:
-     * <p/>
-     * This implementation will do a peek, see if we have resource for the task at the head of the queue, and if so,
-     * call delegate.remove() and return the result. That means that if two threads call this at the very same time,
-     * they'll both check to see if we have resources for the same task (the one at the front of the queue) but they will
-     * then return the first and then second task in the queue -- but neither thread will have checked to see if we have
-     * resources for that second task!
-     * We could fix this by doing something more accurate here, but since we don't have an atomic "compareAndGet" type
-     * of operation from the underlying queue, we may need to resort to blocking. Currently, we're preferring speed over
-     * complete accuracy here. In the face of multiple concurrent calls, the checks we're doing aren't accurate anyway.
+     * Retrieves and removes the head of this queue,
+     * or returns {@code null} if this queue is empty, or if we do not yet have sufficient resources for the next item.
+     *
+     * See the concurrency notes in the class-level javadoc for important notes about the accuracy and threadsafety of
+     * this method.
      *
      * @return the next value in the queue or null if we cannot currently execute anything.
      */
@@ -211,7 +229,7 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
                 return trackIfNecessary(delegate.poll());
 
             } else {
-                return null;  // sleep? block?
+                return null;
             }
         } finally {
             if (locking) {
@@ -222,11 +240,17 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
 
 
     /**
-     * See poll() for a description of the potential inaccuracy in this method.
+     * Retrieves and removes the head of this queue, waiting if necessary
+     * until an element becomes available.
      *
-     * @return
-     * @throws InterruptedException
-     * @see #poll() for an explanation of the potential inaccuracy in this method
+     * See the concurrency notes in the class-level javadoc for important notes about the accuracy and threadsafety of
+     * this method.
+     *
+     * Also note that, since this implementation depends on peek(), it is implemented using a periodic poll of the
+     * underlying queue, rather than calling queue.take() directly. The poll frequency can be set as a constructor argument.
+     *
+     * @return the head of this queue
+     * @throws InterruptedException if interrupted while waiting
      */
     @Override
     public T take() throws InterruptedException {
@@ -273,26 +297,20 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
         //take the item from the delegate
         delegate.take();
         taskAttemptCounter.removeConstrained(item);
-        if (item instanceof FutureTask) {
-            try {
-                FutureTask futureTask = (FutureTask) item;
-                Method m = getFutureTaskClass(futureTask.getClass()).getDeclaredMethod("setException", Throwable.class);
-                m.setAccessible(true);
-                m.invoke(item, new Exception("Could not take item after " + constrainedItemThreshold + " attempts"));
-                return item;
-            } catch (Exception e) {
-                log.error("Error setting exception on future task", e);
-            }
-        }
-        return item;
+        return failTask(item);
     }
 
-    Class getFutureTaskClass(Class clz) {
-        if (clz == FutureTask.class) {
-            return clz;
-        } else {
-            return clz.getSuperclass();
-        }
+
+    /**
+     * If you would like to implement custom logic after an item has failed too many resource checks, override this method.
+     * Some options are to call "cancel()" on tasks, register exceptions, requeue, etc.
+     *
+     * Note that the result of this method will be returned to the original caller.
+     * @param item
+     * @return
+     */
+    protected T failTask(T item) {
+        return item;
     }
 
     /**
@@ -306,9 +324,15 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
     }
 
     /**
-     * See poll() for a description of the potential inaccuracy in this method.
+     * See the concurrency notes in the class-level javadoc for important notes about the accuracy and threadsafety of
+     * this method.
      *
-     * @see #poll() for an explanation of the potential inaccuracy in this method
+     * Also note that, since this implementation depends on peek(), it is implemented using a periodic poll of the
+     * underlying queue, rather than calling queue.take() directly. The poll frequency can be set as a constructor argument.
+     *
+     * @return the head of this queue, or {@code null} if the
+     *         specified waiting time elapses before an element which we have the resources for is available
+     * @see #poll()
      */
     @Override
     public T poll(long timeout, TimeUnit unit) throws InterruptedException {
@@ -660,7 +684,7 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
             if (d == null) {
                 d = new LinkedBlockingQueue<T>();
             }
-            return new ResourceConstrainingQueue<T>(d, cs, pollfreq, builderStrict);
+            return new ResourceConstrainingQueue<T>(d, cs, pollfreq, builderStrict, builderTaskTracker);
         }
 
     }
@@ -691,4 +715,6 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
         }
 
     }
+
+    public static class InsufficientResourcesException extends NoSuchElementException {}
 }

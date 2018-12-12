@@ -1,6 +1,6 @@
 package com.quantumretail.constraint;
 
-import com.quantumretail.MetricsAware;
+import com.quantumretail.metrics.MetricsAware;
 import com.quantumretail.resourcemon.ResourceMonitor;
 import com.quantumretail.resourcemon.ResourceMonitorAware;
 import com.yammer.metrics.core.Meter;

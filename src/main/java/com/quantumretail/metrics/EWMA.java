@@ -1,4 +1,4 @@
-package com.quantumretail;
+package com.quantumretail.metrics;
 
 
 import com.quantumretail.resourcemon.EWMAMonitor;

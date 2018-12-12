@@ -42,8 +42,8 @@ public class LoadPredictors {
      * Why 640K?  Because that <a href="http://www.brainyquote.com/quotes/quotes/b/billgates379657.html">ought to be enough for anyone</a>
      *
      *
-     * See also <a href="http://en.wikiquote.org/wiki/Talk:Bill_Gates#640K.2F1MB">the discussion on the veracity of the quote in question</a>,
-     * but that's not as entertaining.
+     * (See also <a href="http://en.wikiquote.org/wiki/Talk:Bill_Gates#640K.2F1MB">the discussion on the veracity of the quote in question</a>,
+     * but that's not as entertaining.)
      */
     protected static Map<String, Double> defaultLoad() {
         double n = 0.8 / (double) NUM_CPUS;

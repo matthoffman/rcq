@@ -1,26 +1,76 @@
 # Resource Constraining Queue #
 
+## What is RCQ? ##
+
+RCQ ("Resource Constraining Queue") is a set of utilities for building work queues that try to adapt to the available 
+resources on the worker. It is centered around a simple [java.util.concurrent.BlockingQueue](https://docs.oracle.com/javase/8/docs/api/?java/util/concurrent/BlockingQueue.html) wrapper, but it also contains a number of 
+utility classes that could be used independently.
+
+The definition of "available resources" is left to an implementation of a simple [interface](https://github.com/matthoffman/rcq/blob/master/src/main/java/com/quantumretail/constraint/ConstraintStrategy.java); it is easy to
+extend RCQ to fit any definition of "available resource" you can imagine. Out of the box, RCQ can attempt to adapt based on: 
+ * System load average
+ * CPU utilization
+ * Available JVM heap memory 
+    
 ## Why RCQ? ##
 
-RCQ ("Resource Constraining Queue") is a blocking queue that attempts to only return an item if the system has available
-resources. The definition of "available resources" is left to an implementation of a simple interface; it is easy to
-extend RCQ to fit any definition you can imagine. There are, however, a number of good implementations available
-out-of-the-box that use the JVM's built-in resource monitoring to measure system load.
+Often, when implementing producer-consumer patterns, we end up setting the number of consumers based on some heuristic: 
+maybe it's some multiplier on the number of CPUs, or maybe it's some default that is left to the user to configure. 
+Sometimes this works fine -- with a perfectly CPU-bound workload on an otherwise unloaded machine, `# workers == # CPUs` 
+should be ideal. 
 
-RCQ is intended to be used as the queue given in the constructor to a java.util.concurrent.ThreadPoolExecutor, i.e:
+But the workload isn't perfectly CPU-bound, or the machine is shared with other tasks, or when tasks can be memory-bound 
+or disk bound, these heuristics are far from ideal.
 
-    ResourceConstrainingQueue resourceConstrainingQueue = ResourceConstrainingQueues.defaultQueue();
-    ExecutorService executor = new ThreadPoolExecutor(minThreads, maxThreads, 0L, TimeUnit.MILLISECONDS, resourceConstrainingQueue);
+RCQ is intended to get a bit closer to the ideal, with minimal intervention. By default it does that by monitoring the 
+available resources on the node (JVM heap, CPU utilization, or anything else via a custom [ResourceMonitor](https://github.com/matthoffman/rcq/blob/master/src/main/java/com/quantumretail/resourcemon/ResourceMonitor.java))
+and then only returning an item from `queue.poll()` or `queue.take()` 
+if it thinks there are sufficient resources available to execute them. However, it can be configured in a number of ways, 
+and there are a many places where you can hook into it to influence its behavior beyond the default.
 
-In this way, calling `executor.submit(foo)`  will only execute "foo" once the system has available resources. The
-alternative is often creating an ThreadPoolExecutor with a number of threads equal to the number of available processors,
-or something similar, but that will load the system only if the tasks never block for IO. And it doesn't take memory
-or other resources into account at all.
+## Examples ##
+
+At its simplest, RCQ can be used along with java.util.concurrent.ThreadPoolExecutor to have an automatically-adjusting 
+local executor service:
+
+    ResourceConstrainingQueue resourceConstrainingQueue = new ResourceConstrainingQueue.defaultQueue();
+    ExecutorService executor = new ThreadPoolExecutor(1, maxThreads, 0L, TimeUnit.MILLISECONDS, resourceConstrainingQueue);
+
+In this way, calling `executor.submit(foo)` will only execute "foo" once the system has available resources. This is 
+functionally equivalent to: 
+
+    ExecutorService executor = Executors.newFixedThreadPool(1, Runtime.getRuntime().availableProcessors());
+    
+except that the executor returned by `newFixedThreadPool(1, Runtime.getRuntime().availableProcessors())` will always 
+execute as many tasks in parallel as there are processors in the system, and will not adjust for tasks that block for 
+I/O or have memory constraints. 
 
 RCQ is implemented as a wrapper around another queue (a "decorator pattern"), with the default delegate queue being a
-java.util.concurrent.LinkedBlockingQueue. You may provide your own delegate if you prefer PriorityQueue semantics, or
-a different BlockingQueue implementation. RCQ makes no presumptions on the behavior of its delegate beyond those
-defined by the BlockingQueue interface.
+java.util.concurrent.LinkedBlockingQueue. You may provide your own delegate if you prefer different behavior -- RCQ 
+makes no presumptions on the behavior of its delegate beyond those defined by the BlockingQueue interface.
+
+For example: 
+
+### Priority Queue
+Replacing the default LinkedBlockingQueue with an implementation of PriorityQueue can ensure that tasks are executed in priority order.
+
+    ResourceConstrainingQueue resourceConstrainingQueue = new ResourceConstrainingQueue(new MyPriorityQueueImpl(), TaskTrackers.<T>defaultTaskTracker(), 100L);
+    ExecutorService executor = new ThreadPoolExecutor(1, maxThreads, 0L, TimeUnit.MILLISECONDS, resourceConstrainingQueue);
+
+    
+### Distributed Queue    
+Use a Queue implementation provided by a distributed caching library (Hazelcast, Infinispan, Apache Ignite) for simple 
+resource-bound distributed task execution: 
+
+    // replace with any distributed queue implementation, as desired
+    BlockingQueue distributedTaskQueue = Hazelcast.newHazelcastInstance(new Config()).getQueue("tasks"); 
+    ResourceConstrainingQueue resourceConstrainingQueue = new ResourceConstrainingQueue(distributedTaskQueue, TaskTrackers.<T>defaultTaskTracker(), 100L);
+    ExecutorService executor = new ThreadPoolExecutor(1, maxThreads, 0L, TimeUnit.MILLISECONDS, resourceConstrainingQueue);
+
+Note that since each worker is wrapping the distributed queue locally, each worker will scale their execution as needed. 
+So your cluster can support heterogenous workers without further effort.
+
+(Note that RCQ was originally used in a manner similar to this, but with RabbitMQ providing the underlying distributed queue). 
 
 ## Some things that RCQ does *not* do ##
 
@@ -32,6 +82,10 @@ it does not have enough resources for the next item in the queue, it does not at
 
 That is not to say that RCQ must be a strictly FIFO queue. Since it merely wraps another BlockingQueue, it can wrap a
 PriorityBlockingQueue or any other variant of `BlockingQueue` if you prefer.
+
+## Concurrency notes ## 
+
+Because ResourceConstrainingQueue can be used in a variety of ways, 
 
 
 ## "Load" ##
@@ -65,9 +119,8 @@ For example:
 Those classes are explained in more detail below.
 
 The default ResourceMonitors measure "load" in terms of CPU, HEAP_MEM and LOAD_AVERAGE, which are hopefully
-self-explanatory. To define your own resource, simply define a ResourceMonitor, and then in your ConstraintStrategy
-set a threshold
-
+self-explanatory. To define your own resource, simply define a ResourceMonitor which returns your custom key, and then 
+set a threshold for that key in your ConstraintStrategy.
 
 ## The Moving Parts ##
 
@@ -94,7 +147,7 @@ However, if the requests are particularly "bursty", you might find that the `Rea
 much before seeing what the effect on load will be -- for example, if the RCQ is used to feed a very large thread pool,
 load is very low, and a lot of items are added at once, we'll get large bursts of threads, followed by a typically a
 higher-than-ideal number of threads active.  That's because `ReactiveConstraintStrategy` will continue to return `true` until
-those tasks being to be executed and cause an accompanying spike in resources; by the time that has happened, it has
+those tasks have begun to be executed and cause an accompanying spike in resources; by the time that has happened, it has
 handed out more items than it should.
 
 One alternative is to try to predict what effect the next task we're considering handing out will have on the available
