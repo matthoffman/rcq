@@ -70,7 +70,7 @@ resource-bound distributed task execution:
 Note that since each worker is wrapping the distributed queue locally, each worker will scale their execution as needed. 
 So your cluster can support heterogenous workers without further effort.
 
-(Note that RCQ was originally used in a manner similar to this, but with RabbitMQ providing the underlying distributed queue). 
+However, particularly in a distributed context, you need to be aware of some concurrency issues inherent in the design of ResourceConstrainingQueue. In particular, it is possible that two workers that are polling the queue concurrently will check to see if they have resources available to execute the same task, but then actually execute that task and the one after it (so, a worker can pull a task even though it actually confirmed it had resources for the _previous_ task). See the javadoc of [ResourceConstrainingQueue](https://github.com/matthoffman/rcq/blob/master/src/main/java/com/quantumretail/collections/ResourceConstrainingQueue.java) for details, and track issue #1 for one solution. 
 
 ## Some things that RCQ does *not* do ##
 
