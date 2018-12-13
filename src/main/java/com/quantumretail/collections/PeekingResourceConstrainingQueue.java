@@ -15,26 +15,26 @@ import java.util.function.Supplier;
 /**
  * A ResourceConstrainingQueue implementation that tries to precede each poll(), remove() or take() with a peek() call,
  * in order to determine whether we have resources available for the item.
- *
+ * <p>
  * Concurrency note:
  * There are several important concurrency-related issues to keep in mind when using ResourceConstrainingQueue.
- *
+ * <p>
  * First and foremost, this implementation relies on {@link #peek()} to check if we have resources available to execute
  * the next task, without actually claiming that next task. Therefore it assumes that a peek() and a subsequent poll()
  * will return the same object. Of course, with multiple readers, this may well not be the case. Therefore, by default,
  * we have a global lock on reads:  each poll(), remove() or take() operation locks to try to ensure that a subsequent
  * peek() and take() returns the same object.
  * Three things to note about this implementation:
- *  1. If there are other consumers of the underlying queue other than this class, peek() and poll() may return
- *  different objects and we may return items we do not have the resources to handle.
- *  2. If the underlying queue implementation is distributed, such that there are multiple readers on this queue on
- *  different JVMs, the same applies: we may return items that we do not have the resources to handle.
- *  3. Since peek() is non-blocking, blocking calls (poll(timeout), take()) are implemented with a polling loop, with a
- *  poll frequency governed by the "retryFrequencyMS" constructor argument.
- *
+ * 1. If there are other consumers of the underlying queue other than this class, peek() and poll() may return
+ * different objects and we may return items we do not have the resources to handle.
+ * 2. If the underlying queue implementation is distributed, such that there are multiple readers on this queue on
+ * different JVMs, the same applies: we may return items that we do not have the resources to handle.
+ * 3. Since peek() is non-blocking, blocking calls (poll(timeout), take()) are implemented with a polling loop, with a
+ * poll frequency governed by the "retryFrequencyMS" constructor argument.
+ * <p>
  * In practice, the concurrent-access issue is only a problem when subsequent items vary widely in their resource needs,
  * but it's important to be aware of.
- *
+ * <p>
  * If strict == false in the constructor, we will *not* lock on reads. That means that two concurrent reads can return
  * two items, without ever checking to see if we have the resources available for the second item explicitly (the first
  * item will be checked twice instead).
@@ -47,12 +47,10 @@ public class PeekingResourceConstrainingQueue<T> extends ResourceConstrainingQue
     private static final Logger log = LoggerFactory.getLogger(PeekingResourceConstrainingQueue.class);
     final private boolean strict;
 
-    public PeekingResourceConstrainingQueue(BlockingQueue<T>delegate, ConstraintStrategy<T> constraintStrategy, long retryFrequencyMS, boolean strict, TaskTracker<T> taskTracker, long constrainedItemThresholdMS) {
+    public PeekingResourceConstrainingQueue(BlockingQueue<T> delegate, ConstraintStrategy<T> constraintStrategy, long retryFrequencyMS, boolean strict, TaskTracker<T> taskTracker, long constrainedItemThresholdMS) {
         super(delegate, constraintStrategy, retryFrequencyMS, taskTracker, constrainedItemThresholdMS);
         this.strict = strict;
     }
-
-
 
 
     private boolean shouldLock() {

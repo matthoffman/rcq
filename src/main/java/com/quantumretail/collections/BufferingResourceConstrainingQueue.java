@@ -46,10 +46,11 @@ public class BufferingResourceConstrainingQueue<T> extends ResourceConstrainingQ
      * Ideally, we want to pull off no more than 1 task from the queue at a time before we know for sure we have the
      * resources to execute it. That way if the queue is backed by a distributed queue, for example, we ensure as many
      * items are available for other workers as possible.
-     *
+     * <p>
      * There's some duplication between this and pollWithBuffer(timeout), but behavior is sufficiently different in the
      * non-blocking case that it seemed clearer to keep them separate.
-     * @param onNoElementAvailable what to return when there's nothing available
+     *
+     * @param onNoElementAvailable    what to return when there's nothing available
      * @param onInsufficientResources what to return when there's something available, but we don't have sufficient
      *                                resources to execute it.
      * @return an item if present, or the value returned by the appropriate input function/supplier otherwise
@@ -78,14 +79,14 @@ public class BufferingResourceConstrainingQueue<T> extends ResourceConstrainingQ
     /**
      * Get an item, using an intermediate buffer to store items that we do not yet have the resources to execute. Uses
      * a separate thread to poll the underlying queue in order to avoid blocking other threads.
-     *
+     * <p>
      * Ideally, we want to pull off no more than 1 task from the queue at a time before we know for sure we have the
      * resources to execute it. That way if the queue is backed by a distributed queue, for example, we ensure as many
      * items are available for other workers as possible.
-     *
+     * <p>
      * There's some duplication between this and getWithBuffer(timeout), but behavior is sufficiently different in the
      * non-blocking case that it seemed clearer to keep them separate.
-     *
+     * <p>
      * If timeout < 0, it is treated as "no timeout"
      *
      * @param timeout if < 0, it is treated as "no timeout". Otherwise, treated as a best-effort max wait.
@@ -143,8 +144,9 @@ public class BufferingResourceConstrainingQueue<T> extends ResourceConstrainingQ
     }
 
 
-
-    /** must have lock before calling this method! */
+    /**
+     * must have lock before calling this method!
+     */
     private void fillBufferIfEmpty(Optional<Long> timeoutNanos) throws InterruptedException {
         if (buffer == null && timeoutNanos.orElse(1L) > 0) {
             // we do this in a separate thread so that we can release our lock (via fillComplete.await()). That
@@ -182,7 +184,9 @@ public class BufferingResourceConstrainingQueue<T> extends ResourceConstrainingQ
         }
     }
 
-    /** must have lock before calling this method */
+    /**
+     * must have lock before calling this method
+     */
     private void fillBufferIfEmpty() {
         if (buffer == null) {
             buffer = delegate.poll();

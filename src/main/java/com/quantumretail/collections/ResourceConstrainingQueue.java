@@ -18,64 +18,62 @@ import java.util.function.Supplier;
 import static com.codahale.metrics.MetricRegistry.name;
 
 /**
- *
  * This class is the parent class for the various RCQ implementations.
  * The implementations have different tradeoffs in regards to performance and behavior in the event of multiple consumers.
  * In general, users should be able to use either the builder located in this class, or the static helper methods
  * ({@link ResourceConstrainingQueues}) to construct the appropriate subclass, without worrying too much about the
  * details. But see the javadoc for the subclasses for more details on the tradeoffs they make.
- *
+ * <p>
  * Note that this resource-constraining behavior ONLY occurs on {@link #poll()}, {@link #take()} and {@link #remove()}.
  * Other access methods like {@link #peek()}, {@link #iterator()}, {@link #toArray()}, and so on will bypass the
  * resource-constraining behavior.
  * <p/>
- *
+ * <p>
  * This class has 3 distinct modes of operation, which represent different tradeoffs in the face of concurrent access.
  * "buffered mode" will hold at most one item in an internal "buffer" until we have the resources available to execute
  * it. Since that item has been removed from the underlying queue, underlying queues that have durability or HA
  * guarantees may consider that item "done" and stop tracking it, thus leaving the possibility that the task is lost
- *
+ * <p>
  * Items will only be buffered in response to a read operation (we don't eagerly fetch from the underlying queue) and
  * only when the resource constraint check fails for that item.
- *
+ * <p>
  * Concurrency notes:
  * There are several important concurrency-related issues to keep in mind when using ResourceConstrainingQueue.
- *
+ * <p>
  * First and foremost, this implementation relies on {@link #peek()} to check if we have resources available to execute
  * the next task, without actually claiming that next task. Therefore it assumes that a peek() and a subsequent poll()
  * will return the same object. Of course, with multiple readers, this may well not be the case. Therefore, by default,
  * we have a global lock on reads:  each poll(), remove() or take() operation locks to try to ensure that a subsequent
  * peek() and take() returns the same object.
  * Three things to note about this implementation:
- *  1. If there are other consumers of the underlying queue outside of this class, peek() and poll() may return
- *  different objects and we may return items we do not have the resources to handle.
- *  2. If the underlying queue implementation is distributed, meaning there are multiple readers on this queue on
- *  different JVMs, the same applies: a consecutive peek() and poll() can return different objects, so we may return
- *  items that we do not have the resources to handle.
- *  3. Since peek() is non-blocking, blocking calls (poll(timeout), take()) are implemented with a polling loop, with a
- *  poll frequency governed by the "retryFrequencyMS" argument.
- *
+ * 1. If there are other consumers of the underlying queue outside of this class, peek() and poll() may return
+ * different objects and we may return items we do not have the resources to handle.
+ * 2. If the underlying queue implementation is distributed, meaning there are multiple readers on this queue on
+ * different JVMs, the same applies: a consecutive peek() and poll() can return different objects, so we may return
+ * items that we do not have the resources to handle.
+ * 3. Since peek() is non-blocking, blocking calls (poll(timeout), take()) are implemented with a polling loop, with a
+ * poll frequency governed by the "retryFrequencyMS" argument.
+ * <p>
  * In practice, the concurrent-access issue is only a problem when subsequent items vary widely in their resource needs,
  * but it's important to be aware of.
- *
+ * <p>
  * Another concurrency-related note:
- *
+ * <p>
  * If there are tasks available in the underlying queue, but we do not yet have the resources to hand them out, we do
  * not guarantee ordering between competing consumers. That is, if multiple threads are attempting to read from this
  * queue, but we are waiting to have the available resources to hand out the next task, which thread actually gets the
  * task when resources do become available is undefined. There is currently no "fair" mode for resource-contented waits.
  * However, if we are waiting for items to become available on the underlying queue, ordering *is* guaranteed, provided
  * the underlying queue guarantees order. The first caller should get the first item.
- *
+ * <p>
  * If strict == false in the constructor, we will *not* lock on reads. That means that two concurrent reads can return
  * two items, without ever checking to see if we have the resources available for the second item explicitly (the first
  * item will be checked twice instead).
  * In some cases, that might be preferable to locking: if resources are generally homogeneous, and high throughput is
  * important, the cost of occasionally checking the wrong task may be acceptable. However, strict is "true" by default.
- *
+ * <p>
  * Track https://github.com/matthoffman/rcq/issues/1 for another alternative implementation with different correctness
  * guarantees that doesn't rely on peek().
- *
  */
 public abstract class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAware {
     private static final Logger log = LoggerFactory.getLogger(ResourceConstrainingQueue.class);
@@ -164,28 +162,28 @@ public abstract class ResourceConstrainingQueue<T> implements BlockingQueue<T>, 
      * Retrieves and removes the head of this queue.  This method differs
      * from {@link #poll poll} only in that it throws an exception if this
      * queue is empty.
-     *
+     * <p>
      * See the concurrency notes in the class-level javadoc for important notes about the accuracy and threadsafety of
      * this method.
      *
      * @return the head of this queue
-     * @throws NoSuchElementException if this queue is empty
+     * @throws NoSuchElementException         if this queue is empty
      * @throws InsufficientResourcesException if we do not have sufficient resources for the next element
      */
     @Override
     public T remove() {
-            return getItemNonBlocking(() -> {
-                throw new NoSuchElementException();
-            }, (n) -> {
-                throw new InsufficientResourcesException(n);
-            });
+        return getItemNonBlocking(() -> {
+            throw new NoSuchElementException();
+        }, (n) -> {
+            throw new InsufficientResourcesException(n);
+        });
     }
 
     /**
      * Get an item if it is available, or the value of onNoElementAvailable if there is nothing available, or onInsufficientResources
      * if there is an item available but there are insufficient resources.
      *
-     * @param onNoElementAvailable what to return when there's nothing available
+     * @param onNoElementAvailable    what to return when there's nothing available
      * @param onInsufficientResources what to return when there's something available, but we don't have sufficient
      *                                resources to execute it.
      * @return an item if present, or the value returned by the appropriate input function/supplier otherwise
@@ -219,7 +217,7 @@ public abstract class ResourceConstrainingQueue<T> implements BlockingQueue<T>, 
     /**
      * Retrieves and removes the head of this queue,
      * or returns {@code null} if this queue is empty, or if we do not yet have sufficient resources for the next item.
-     *
+     * <p>
      * See the concurrency notes in the class-level javadoc for important notes about the accuracy and threadsafety of
      * this method.
      *
@@ -227,17 +225,17 @@ public abstract class ResourceConstrainingQueue<T> implements BlockingQueue<T>, 
      */
     @Override
     public T poll() {
-            return getItemNonBlocking(() -> null, (n) -> null);
+        return getItemNonBlocking(() -> null, (n) -> null);
     }
 
 
     /**
      * Retrieves and removes the head of this queue, waiting if necessary
      * until an element becomes available.
-     *
+     * <p>
      * See the concurrency notes in the class-level javadoc for important notes about the accuracy and threadsafety of
      * this method.
-     *
+     * <p>
      * Also note that, since this implementation depends on peek(), it is implemented using a periodic poll of the
      * underlying queue, rather than calling queue.take() directly. The poll frequency can be set as a constructor argument.
      * TODO: exponential decay on the poll frequency
@@ -262,8 +260,9 @@ public abstract class ResourceConstrainingQueue<T> implements BlockingQueue<T>, 
     /**
      * If you would like to implement custom logic after an item has failed too many resource checks, override this method.
      * Some options are to call "cancel()" on tasks, register exceptions, requeue, etc.
-     *
+     * <p>
      * Note that the result of this method will be returned to the original caller.
+     *
      * @param item
      * @return
      */
@@ -284,12 +283,12 @@ public abstract class ResourceConstrainingQueue<T> implements BlockingQueue<T>, 
     /**
      * See the concurrency notes in the class-level javadoc for important notes about the accuracy and threadsafety of
      * this method.
-     *
+     * <p>
      * Also note that, since this implementation depends on peek(), it is implemented using a periodic poll of the
      * underlying queue, rather than calling queue.take() directly. The poll frequency can be set as a constructor argument.
      *
      * @return the head of this queue, or {@code null} if the
-     *         specified waiting time elapses before an element which we have the resources for is available
+     * specified waiting time elapses before an element which we have the resources for is available
      * @see #poll()
      */
     @Override
@@ -634,6 +633,7 @@ public abstract class ResourceConstrainingQueue<T> implements BlockingQueue<T>, 
 
         /**
          * The maximum amount of time to wait until there are sufficient resources for an item.
+         *
          * @param timeLimit
          * @param timeUnit
          * @return
@@ -657,7 +657,7 @@ public abstract class ResourceConstrainingQueue<T> implements BlockingQueue<T>, 
                 builderTaskTracker = TaskTrackers.defaultTaskTracker();
             }
             if (this.useBuffer) {
-               return new BufferingResourceConstrainingQueue<>(d, cs, pollfreq, builderTaskTracker, noResourcesTimeLimit);
+                return new BufferingResourceConstrainingQueue<>(d, cs, pollfreq, builderTaskTracker, noResourcesTimeLimit);
             } else {
                 return new PeekingResourceConstrainingQueue<>(d, cs, pollfreq, builderStrict, builderTaskTracker, noResourcesTimeLimit);
             }
@@ -694,10 +694,11 @@ public abstract class ResourceConstrainingQueue<T> implements BlockingQueue<T>, 
 
     public static class InsufficientResourcesException extends NoSuchElementException {
         public InsufficientResourcesException(Object o) {
-            super("Insufficient resources to execute "+ o.toString());
+            super("Insufficient resources to execute " + o.toString());
         }
 
         // sometimes you feel like an arg... sometimes you don't.
-        public InsufficientResourcesException() { }
+        public InsufficientResourcesException() {
+        }
     }
 }
