@@ -9,7 +9,6 @@ import com.codahale.metrics.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.lang.reflect.Method;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
@@ -20,7 +19,7 @@ import java.util.concurrent.locks.ReentrantLock;
 import static com.codahale.metrics.MetricRegistry.name;
 
 /**
- * Note that this resource-constraining behavior ONLY occurs on {@link #poll()}a, {@link #take()} and {@link #remove()}.
+ * Note that this resource-constraining behavior ONLY occurs on {@link #poll()}, {@link #take()} and {@link #remove()}.
  * Other access methods like {@link #peek()}, {@link #iterator()}, {@link #toArray()}, and so on will bypass the
  * resource-constraining behavior.
  * <p/>
@@ -38,10 +37,11 @@ import static com.codahale.metrics.MetricRegistry.name;
  *  different objects and we may return items we do not have the resources to handle.
  *  2. If the underlying queue implementation is distributed, such that there are multiple readers on this queue on
  *  different JVMs, the same applies: we may return items that we do not have the resources to handle.
- *  3. Since peek() is non-blocking, blocking calls (peek(),
+ *  3. Since peek() is non-blocking, blocking calls (poll(timeout), take()) are implemented with a polling loop, with a
+ *  poll frequency governed by the "retryFrequencyMS" constructor argument.
  *
- * In practice, this is only an issue if the subsequent items vary widely in their resource needs, but it's important
- * to be aware of.
+ * In practice, the concurrent-access issue is only a problem when subsequent items vary widely in their resource needs,
+ * but it's important to be aware of.
  *
  * If strict == false in the constructor, we will *not* lock on reads. That means that two concurrent reads can return
  * two items, without ever checking to see if we have the resources available for the second item explicitly (the first
@@ -57,7 +57,7 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
     private static final Logger log = LoggerFactory.getLogger(ResourceConstrainingQueue.class);
 
     public static <T> ResourceConstrainingQueueBuilder<T> builder() {
-        return new ResourceConstrainingQueueBuilder<T>();
+        return new ResourceConstrainingQueueBuilder<>();
     }
 
     private boolean failAfterAttemptThresholdReached = false;
