@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
+import java.util.function.Function;
 
 import static com.quantumretail.resourcemon.ResourceMonitors.defaultCachingResourceMonitor;
 import static com.quantumretail.resourcemon.ResourceMonitors.defaultPredictiveResourceMonitor;
@@ -206,9 +207,65 @@ public class ResourceConstrainingQueueTest {
 //        ex.shutdown();
 //    }
 
+    @Test
+    public void test_take() throws InterruptedException, ExecutionException {
+        ConstantConstraintStrategy<Integer> strategy = new ConstantConstraintStrategy<>(true);
+        ResourceConstrainingQueue<Integer> q = ResourceConstrainingQueue.<Integer>builder()
+                .withConstraintStrategy(strategy)
+                .strict(true)
+                .build();
+
+        // basic test:
+        q.add(5);
+        assertEquals(1, q.size());
+        Integer val = q.take();
+        assertEquals((Integer) 5, val);
+        assertEquals(0, q.size());
+        ExecutorService executorService = Executors.newSingleThreadExecutor();
+        try {
+            Future<Integer> f = executorService.submit(() -> q.take());
+            f.get(100, TimeUnit.MILLISECONDS);
+            fail("Expected take() to timeout");
+        } catch (TimeoutException e) {
+           // expected exception.
+        } finally {
+            executorService.shutdown();
+        }
+    }
+
+    @Test
+    public void test_poll_with_timeout() throws InterruptedException, ExecutionException {
+        ConstantConstraintStrategy<Integer> strategy = new ConstantConstraintStrategy<>(true);
+        ResourceConstrainingQueue<Integer> q = ResourceConstrainingQueue.<Integer>builder()
+                .withConstraintStrategy(strategy)
+                .strict(true)
+                .build();
+
+        // basic test:
+        q.add(5);
+        assertEquals(1, q.size());
+        Integer val = q.poll(100, TimeUnit.MILLISECONDS);
+        assertEquals((Integer) 5, val);
+        assertEquals(0, q.size());
+        // try to call poll() on an empty queue, make sure it times out
+        long start = System.currentTimeMillis();
+        Integer i = q.poll(10, TimeUnit.MILLISECONDS);
+        assertNull(i);
+        // make sure it actually waited 10 millis.
+        assert(System.currentTimeMillis() >= start+10);
+    }
 
     @Test
     public void test_remove() throws Exception {
+        testGetItem(ResourceConstrainingQueue::remove);
+    }
+
+    @Test
+    public void test_poll() throws Exception {
+        testGetItem(ResourceConstrainingQueue::poll);
+    }
+
+    private void testGetItem(Function<ResourceConstrainingQueue<Integer>, Integer> getItem) {
         ConstantConstraintStrategy<Integer> strategy = new ConstantConstraintStrategy<Integer>(true);
         ResourceConstrainingQueue<Integer> q = ResourceConstrainingQueue.<Integer>builder()
                 .withConstraintStrategy(strategy)
@@ -220,8 +277,8 @@ public class ResourceConstrainingQueueTest {
         Integer val = q.remove();
         assertEquals((Integer) 5, val);
         assertEquals(0, q.size());
-    }
 
+    }
 
     /**
      * I'll admit, this test is here more for test coverage numbers than the real possibility that the builder is broken.

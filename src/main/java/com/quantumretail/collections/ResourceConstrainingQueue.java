@@ -87,6 +87,9 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
     // this is the lock we'll use if strict = true.
     Lock takeLock = new ReentrantLock();
 
+//    final private boolean shouldBuffer;
+//    AtomicReference<T> buffer = new AtomicReference<>();
+
     /**
      * Build a ResourceConstrainingQueue using all default options.
      * If you want to override some defaults, but not all, use the ResourceConstrainingQueueBuilder; it's much easier.
@@ -119,6 +122,9 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
     }
 
     protected T trackIfNecessary(T item) {
+        // if item == null, nothing to track.
+        if (item == null) return null;
+
         if (trackedRemovals != null) {
             trackedRemovals.mark();
         }
@@ -256,38 +262,7 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
      */
     @Override
     public T take() throws InterruptedException {
-        while (true) {
-            try {
-                getItem(Queue::poll, () -> {
-                    throw new NoSuchElementException();
-                }, (nextItem) -> {
-                    if (taskAttemptCounter != null) {
-                        //increment number of tries for this item
-                        int attempts = taskAttemptCounter.incrementConstrained(nextItem);
-                        if (attempts >= constrainedItemThreshold) {
-                            if (failAfterAttemptThresholdReached) {
-                                return failForTooMayTries(nextItem);
-                            } else {
-                                //just log it and continue to try
-                                if (log.isTraceEnabled()) {
-                                    log.trace("Could not take item after " + (constrainedItemThreshold * retryFrequencyMS / 1000.0) + " seconds:" + nextItem);
-                                }
-                                //set retries back to 1
-                                taskAttemptCounter.resetConstrained(nextItem);
-                                throw new InsufficientResourcesException();
-                            }
-                        }
-                    }
-                    // this will force us to go back through the loop
-                    // TODO: I'm not wild about using exceptions for flow control like this, but currently
-                    // "failForTooManyTries" can return null, so until we refactor that we can't use null as a "should retry" marker
-                    throw new InsufficientResourcesException();
-                });
-            } catch (NoSuchElementException e) {
-                // sleep and retry
-                sleep();
-            }
-        }
+        return poll(-1, TimeUnit.NANOSECONDS);
     }
 
     T failForTooMayTries(T item) {
@@ -340,27 +315,40 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
         long totalSleepNanos = 0;
         long startNanos = System.nanoTime();
         long timeoutNanos = unit.toNanos(timeout);
-        while (totalSleepNanos > timeoutNanos) {
-            boolean locking = shouldLock();
+        // we treat "timeoutNanos < 0" as "no limit"
+        while (timeoutNanos < 0 || totalSleepNanos < timeoutNanos) {
             try {
-                if (locking) {
-                    takeLock.lock();
-                }
-                T nextItem = delegate.peek();
-                if (shouldReturn(nextItem)) {
-                    // Note that we might be returning a *different item* than nextItem if we have multiple threads accessing this concurrently!
-                    // We're intentionally taking that risk to avoid locking.
-                    return trackIfNecessary(delegate.poll(timeoutNanos - totalSleepNanos, TimeUnit.NANOSECONDS));
-                } else {
-                    sleep();
-                    totalSleepNanos = System.nanoTime() - startNanos;
-                }
-            } finally {
-                if (locking) {
-                    takeLock.unlock();
-                }
+                return getItem(Queue::poll, () -> {
+                    throw new NoSuchElementException();
+                }, (nextItem) -> {
+                    if (taskAttemptCounter != null) {
+                        //increment number of tries for this item
+                        int attempts = taskAttemptCounter.incrementConstrained(nextItem);
+                        if (attempts >= constrainedItemThreshold) {
+                            if (failAfterAttemptThresholdReached) {
+                                return failForTooMayTries(nextItem);
+                            } else {
+                                //just log it and continue to try
+                                if (log.isTraceEnabled()) {
+                                    log.trace("Could not take item after " + (constrainedItemThreshold * retryFrequencyMS / 1000.0) + " seconds:" + nextItem);
+                                }
+                                //set retries back to 1
+                                taskAttemptCounter.resetConstrained(nextItem);
+                                throw new InsufficientResourcesException();
+                            }
+                        }
+                    }
+                    // this will force us to go back through the loop
+                    // TODO: I'm not wild about using exceptions for flow control like this, but currently
+                    // "failForTooManyTries" can return null, so until we refactor that we can't use null as a "should retry" marker
+                    throw new InsufficientResourcesException();
+                });
+            } catch (NoSuchElementException e) {
+                // alas, either nothing available or we don't have the resources to execute it. Sleep, and try again.
+                // sleep and retry
+                sleep();
+                totalSleepNanos = System.nanoTime() - startNanos;
             }
-
         }
         // if we got here, we timed out.
         return null;
