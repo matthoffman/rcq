@@ -130,8 +130,8 @@ public class ResourceConstrainingQueueTest {
     }
 
     private class NoResource_RCQ<T> extends ResourceConstrainingQueue<T> {
-        public NoResource_RCQ(BlockingQueue<T> delegate, ConstraintStrategy<T> constraintStrategy, long retryFrequencyMS, boolean strict, TaskTracker<T> taskTracker, long constrainedItemThreshold) {
-            super(delegate, constraintStrategy, retryFrequencyMS, strict, taskTracker, constrainedItemThreshold);
+        public NoResource_RCQ(BlockingQueue<T> delegate, ConstraintStrategy<T> constraintStrategy, long retryFrequencyMS, boolean strict, boolean shouldBuffer, TaskTracker<T> taskTracker, long constrainedItemThreshold) {
+            super(delegate, constraintStrategy, retryFrequencyMS, strict, shouldBuffer, taskTracker, constrainedItemThreshold);
         }
 
         @Override
@@ -278,6 +278,57 @@ public class ResourceConstrainingQueueTest {
         assertEquals((Integer) 5, val);
         assertEquals(0, q.size());
 
+    }
+
+    @Test
+    public void test_poll_doesnt_wait_for_take_unbuffered() throws ExecutionException, InterruptedException {
+       ExecutorService executorService = Executors.newCachedThreadPool();
+       try {
+           ConstantConstraintStrategy<Integer> strategy = new ConstantConstraintStrategy<>(true);
+           ResourceConstrainingQueue<Integer> q = ResourceConstrainingQueue.<Integer>builder()
+                   .withConstraintStrategy(strategy)
+                   .useBuffer(false)
+                   .build();
+//           BlockingQueue<Integer> q = new LinkedBlockingQueue<>();
+
+           Future<Integer> take = executorService.submit(q::take);
+           Future<Integer> poll1 = executorService.submit((Callable<Integer>) q::poll);
+           Future<Integer> poll2 = executorService.submit((Callable<Integer>) q::poll);
+           Thread.sleep(1000);
+           assertFalse(take.isDone()); // should still be waiting
+           // note: currently, unbuffered mode doesn't handle blocking & nonblocking calls correctly.
+           assertTrue(poll1.isDone());
+           assertNull(poll1.get());
+           assertTrue(poll2.isDone());
+           assertNull(poll2.get());
+       } finally {
+           executorService.shutdownNow();
+       }
+    }
+
+    @Test
+    public void test_poll_doesnt_wait_for_take_buffered() throws ExecutionException, InterruptedException {
+        ExecutorService executorService = Executors.newCachedThreadPool();
+        try {
+            ConstantConstraintStrategy<Integer> strategy = new ConstantConstraintStrategy<>(true);
+            ResourceConstrainingQueue<Integer> q = ResourceConstrainingQueue.<Integer>builder()
+                    .withConstraintStrategy(strategy)
+                    .useBuffer(true)
+                    .build();
+//           BlockingQueue<Integer> q = new LinkedBlockingQueue<>();
+
+            Future<Integer> take = executorService.submit(q::take);
+            Future<Integer> poll1 = executorService.submit((Callable<Integer>) q::poll);
+            Future<Integer> poll2 = executorService.submit((Callable<Integer>) q::poll);
+            Thread.sleep(1000);
+            assertFalse(take.isDone()); // should still be waiting
+            assertTrue(poll1.isDone());
+            assertNull(poll1.get());
+            assertTrue(poll2.isDone());
+            assertNull(poll2.get());
+        } finally {
+            executorService.shutdownNow();
+        }
     }
 
     /**
