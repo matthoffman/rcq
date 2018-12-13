@@ -12,9 +12,12 @@ import org.slf4j.LoggerFactory;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
+import java.util.Queue;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static com.codahale.metrics.MetricRegistry.name;
 
@@ -89,7 +92,7 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
      * If you want to override some defaults, but not all, use the ResourceConstrainingQueueBuilder; it's much easier.
      */
     public ResourceConstrainingQueue() {
-        this(new LinkedBlockingQueue<T>(), TaskTrackers.<T>defaultTaskTracker(), DEFAULT_POLL_FREQ);
+        this(new LinkedBlockingQueue<>(), TaskTrackers.defaultTaskTracker(), DEFAULT_POLL_FREQ);
     }
 
     public ResourceConstrainingQueue(BlockingQueue<T> delegate, TaskTracker<T> taskTracker, long defaultPollFreq) {
@@ -165,32 +168,46 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
      */
     @Override
     public T remove() {
+        return getItem(Queue::remove, () -> {throw new NoSuchElementException();}, (n) -> {throw new InsufficientResourcesException();});
+    }
+
+    /**
+     * Abstracting out the poll, take, and remove methods
+     * @param getFromDelegate
+     * @param onNoElementAvailable
+     * @param onInsufficientResources
+     * @return
+     */
+    private T getItem(Function<BlockingQueue<T>, T> getFromDelegate, Supplier<T> onNoElementAvailable, Function<T, T> onInsufficientResources) {
         boolean locking = shouldLock();
         try {
             if (locking) {
-                // java 1.7+ note: synchronized(obj) and StripedLock are both more efficient than ReentrantLock for
+                // perf note: synchronized(obj) and StripedLock are both more efficient than ReentrantLock for
                 // most cases, but using ReentrantLock makes the "optionally strict" logic much simpler, and the
                 // differences are not significant in this application.
                 takeLock.lock();
             }
             T nextItem = delegate.peek();
-            if (nextItem == null || shouldReturn(nextItem)) {
+            if (nextItem == null) {
+                return onNoElementAvailable.get();
+            } else if (shouldReturn(nextItem)) {
                 // note that if nextItem == null, remove() here will throw an exception.
                 // Note that we might be returning a *different item* than nextItem if we have multiple threads
                 // accessing this concurrently and strict == false!
                 // When strict == false, we're intentionally taking that risk to avoid locking.
-                return trackIfNecessary(delegate.remove());
+                return trackIfNecessary(getFromDelegate.apply(delegate));
             } else {
-                throw new InsufficientResourcesException();
+               return onInsufficientResources.apply(nextItem);
             }
         } finally {
             if (locking) {
                 takeLock.unlock();
             }
         }
+
     }
 
-    protected boolean shouldLock() {
+    private boolean shouldLock() {
         return strict && taskTracker != null;
     }
 
@@ -219,25 +236,7 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
      */
     @Override
     public T poll() {
-        boolean locking = shouldLock();
-        try {
-            if (locking) {
-                takeLock.lock();
-            }
-            T nextItem = delegate.peek();
-            if (nextItem == null || shouldReturn(nextItem)) {
-                // Note that we might be returning a *different item* than nextItem if we have multiple threads accessing this concurrently!
-                // We're intentionally taking that risk to avoid locking.
-                return trackIfNecessary(delegate.poll());
-
-            } else {
-                return null;
-            }
-        } finally {
-            if (locking) {
-                takeLock.unlock();
-            }
-        }
+        return getItem(Queue::poll, () -> null, (n) -> null);
     }
 
 
@@ -250,54 +249,51 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
      *
      * Also note that, since this implementation depends on peek(), it is implemented using a periodic poll of the
      * underlying queue, rather than calling queue.take() directly. The poll frequency can be set as a constructor argument.
+     * TODO: exponential decay on the poll frequency
      *
      * @return the head of this queue
      * @throws InterruptedException if interrupted while waiting
      */
     @Override
     public T take() throws InterruptedException {
-        boolean locking = shouldLock();
         while (true) {
             try {
-                if (locking) {
-                    takeLock.lock();
-                }
-                T nextItem = delegate.peek();
-                if (nextItem != null && shouldReturn(nextItem)) {
-                    // Note that we might be returning a *different item* than nextItem if we have multiple threads accessing this concurrently!
-                    // We're intentionally taking that risk to avoid locking.
-                    return trackIfNecessary(delegate.take());
-                } else if (nextItem != null && taskAttemptCounter != null) {
-                    //increment number of tries for this item
-                    int attempts = taskAttemptCounter.incrementConstrained(nextItem);
-                    if (attempts >= constrainedItemThreshold) {
-                        if (failAfterAttemptThresholdReached) {
-                            T failedResult = failForTooMayTries(nextItem);
-                            return failedResult;
-                        } else {
-                            //just log it and continue to try
-                            if (log.isTraceEnabled()) {
-                                log.trace("Could not take item after " + (constrainedItemThreshold * retryFrequencyMS / 1000.0) + " seconds:" + nextItem);
+                getItem(Queue::poll, () -> {
+                    throw new NoSuchElementException();
+                }, (nextItem) -> {
+                    if (taskAttemptCounter != null) {
+                        //increment number of tries for this item
+                        int attempts = taskAttemptCounter.incrementConstrained(nextItem);
+                        if (attempts >= constrainedItemThreshold) {
+                            if (failAfterAttemptThresholdReached) {
+                                return failForTooMayTries(nextItem);
+                            } else {
+                                //just log it and continue to try
+                                if (log.isTraceEnabled()) {
+                                    log.trace("Could not take item after " + (constrainedItemThreshold * retryFrequencyMS / 1000.0) + " seconds:" + nextItem);
+                                }
+                                //set retries back to 1
+                                taskAttemptCounter.resetConstrained(nextItem);
+                                throw new InsufficientResourcesException();
                             }
-                            //set retries back to 1
-                            taskAttemptCounter.resetConstrained(nextItem);
                         }
                     }
-                }
-
-            } finally {
-                if (locking) {
-                    takeLock.unlock();
-                }
+                    // this will force us to go back through the loop
+                    // TODO: I'm not wild about using exceptions for flow control like this, but currently
+                    // "failForTooManyTries" can return null, so until we refactor that we can't use null as a "should retry" marker
+                    throw new InsufficientResourcesException();
+                });
+            } catch (NoSuchElementException e) {
+                // sleep and retry
+                sleep();
             }
-            sleep();
         }
     }
 
-    T failForTooMayTries(T item) throws InterruptedException {
+    T failForTooMayTries(T item) {
         log.error("Could not take item after " + constrainedItemThreshold + " attempts:  " + item);
         //take the item from the delegate
-        delegate.take();
+        delegate.remove();
         taskAttemptCounter.removeConstrained(item);
         return failTask(item);
     }

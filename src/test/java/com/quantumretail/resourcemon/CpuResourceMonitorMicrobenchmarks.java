@@ -34,7 +34,7 @@ public class CpuResourceMonitorMicrobenchmarks extends AbstractBenchmark {
 //    }
 
 
-    @Test
+//    @Test
     public void testSunMethod() throws Exception {
         // this only works w/ JDK7
         CpuResourceMonitor cpuResourceMonitor = new CpuResourceMonitor();
@@ -45,7 +45,7 @@ public class CpuResourceMonitorMicrobenchmarks extends AbstractBenchmark {
 //        System.out.println("D: "+d);
     }
 
-    @Test
+//    @Test
     public void testProcMethod() throws Exception {
         CpuResourceMonitor cpuResourceMonitor = new CpuResourceMonitor(false, true);
         Map<String, Double> d = null;
