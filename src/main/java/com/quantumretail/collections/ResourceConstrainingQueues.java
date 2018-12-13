@@ -14,7 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Class providing some factory methods of typical ResourceConstrainingQueue combinations
- *
+ * <p>
  * There are a lot of moving parts in RCQ, so this is intended to make life a little simpler. Note that there is also
  * a builder, in case that helps.
  *
@@ -24,28 +24,25 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class ResourceConstrainingQueues {
 
     public static <T> ResourceConstrainingQueue<T> defaultQueue() {
-        return new ResourceConstrainingQueue<T>();
+        return ResourceConstrainingQueue.<T>builder().build();
     }
 
 
     public static <T> ResourceConstrainingQueue<T> defaultQueueWithFeedbackThread(Map<String, Double> thresholds, ScheduledExecutorService feedbackThread) {
         TaskTracker<T> taskTracker = TaskTrackers.defaultTaskTracker();
-        return new ResourceConstrainingQueue<T>(new LinkedBlockingQueue<T>(),
-                ConstraintStrategies.defaultCombinedConstraintStrategyWithFeedbackThread(thresholds, taskTracker, feedbackThread),
-                ResourceMonitors.DEFAULT_UPDATE_FREQ,
-                true,
-                taskTracker);
+        return ResourceConstrainingQueue.<T>builder()
+                .withConstraintStrategy(ConstraintStrategies.defaultCombinedConstraintStrategyWithFeedbackThread(thresholds, taskTracker, feedbackThread))
+                .withTaskTracker(taskTracker)
+                .build();
     }
 
     public static <T> ResourceConstrainingQueue<T> defaultQueue(Map<String, Double> thresholds) {
 
         TaskTracker<T> taskTracker = TaskTrackers.defaultTaskTracker();
-        return new ResourceConstrainingQueue<T>(
-                new LinkedBlockingQueue<T>(),
-                ConstraintStrategies.defaultConstraintStrategy(thresholds, taskTracker),
-                ResourceMonitors.DEFAULT_UPDATE_FREQ,
-                true,
-                taskTracker);
+        return ResourceConstrainingQueue.<T>builder()
+                .withConstraintStrategy(ConstraintStrategies.defaultConstraintStrategy(thresholds, taskTracker))
+                .withTaskTracker(taskTracker)
+                .build();
     }
 
     public static <T> ResourceConstrainingQueue<T> defaultQueueWithFeedbackThread(Map<String, Double> thresholds) {

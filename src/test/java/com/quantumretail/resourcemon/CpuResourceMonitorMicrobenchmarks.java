@@ -7,7 +7,7 @@ import java.util.Map;
 
 /**
  * A simple microbenchmark to test methods of getting CPU time.
- *
+ * TODO: reimplement this in JMH, now that that is an option.
  */
 public class CpuResourceMonitorMicrobenchmarks extends AbstractBenchmark {
 

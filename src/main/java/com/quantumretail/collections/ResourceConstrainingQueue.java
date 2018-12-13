@@ -11,7 +11,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -19,66 +18,25 @@ import java.util.function.Supplier;
 import static com.codahale.metrics.MetricRegistry.name;
 
 /**
+ * This class is the parent class for the various RCQ implementations.
+ * The implementations have different tradeoffs in regards to performance and behavior in the event of multiple consumers.
+ * In general, users should be able to use either the builder located in this class, or the static helper methods
+ * ({@link ResourceConstrainingQueues}) to construct the appropriate subclass, without worrying too much about the
+ * details. But see the javadoc for the subclasses for more details on the tradeoffs they make.
+ * <p>
  * Note that this resource-constraining behavior ONLY occurs on {@link #poll()}, {@link #take()} and {@link #remove()}.
  * Other access methods like {@link #peek()}, {@link #iterator()}, {@link #toArray()}, and so on will bypass the
  * resource-constraining behavior.
  * <p/>
- *
- * This class has 3 distinct modes of operation, which represent different tradeoffs in the face of concurrent access.
- * "buffered mode" will hold at most one item in an internal "buffer" until we have the resources available to execute
- * it. Since that item has been removed from the underlying queue, underlying queues that have durability or HA
- * guarantees may consider that item "done" and stop tracking it, thus leaving the possibility that the task is lost
- *
- * Items will only be buffered in response to a read operation (we don't eagerly fetch from the underlying queue) and
- * only when the resource constraint check fails for that item.
- *
- * Concurrency notes:
- * There are several important concurrency-related issues to keep in mind when using ResourceConstrainingQueue.
- *
- * First and foremost, this implementation relies on {@link #peek()} to check if we have resources available to execute
- * the next task, without actually claiming that next task. Therefore it assumes that a peek() and a subsequent poll()
- * will return the same object. Of course, with multiple readers, this may well not be the case. Therefore, by default,
- * we have a global lock on reads:  each poll(), remove() or take() operation locks to try to ensure that a subsequent
- * peek() and take() returns the same object.
- * Three things to note about this implementation:
- *  1. If there are other consumers of the underlying queue outside of this class, peek() and poll() may return
- *  different objects and we may return items we do not have the resources to handle.
- *  2. If the underlying queue implementation is distributed, meaning there are multiple readers on this queue on
- *  different JVMs, the same applies: a consecutive peek() and poll() can return different objects, so we may return
- *  items that we do not have the resources to handle.
- *  3. Since peek() is non-blocking, blocking calls (poll(timeout), take()) are implemented with a polling loop, with a
- *  poll frequency governed by the "retryFrequencyMS" argument.
- *
- * In practice, the concurrent-access issue is only a problem when subsequent items vary widely in their resource needs,
- * but it's important to be aware of.
- *
- * Another concurrency-related note:
- *
- * If there are tasks available in the underlying queue, but we do not yet have the resources to hand them out, we do
- * not guarantee ordering between competing consumers. That is, if multiple threads are attempting to read from this
- * queue, but we are waiting to have the available resources to hand out the next task, which thread actually gets the
- * task when resources do become available is undefined. There is currently no "fair" mode for resource-contented waits.
- * However, if we are waiting for items to become available on the underlying queue, ordering *is* guaranteed, provided
- * the underlying queue guarantees order. The first caller should get the first item.
- *
- * If strict == false in the constructor, we will *not* lock on reads. That means that two concurrent reads can return
- * two items, without ever checking to see if we have the resources available for the second item explicitly (the first
- * item will be checked twice instead).
- * In some cases, that might be preferable to locking: if resources are generally homogeneous, and high throughput is
- * important, the cost of occasionally checking the wrong task may be acceptable. However, strict is "true" by default.
- *
- * Track https://github.com/matthoffman/rcq/issues/1 for another alternative implementation with different correctness
- * guarantees that doesn't rely on peek().
- *
+
  */
-public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAware {
+public abstract class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAware {
     private static final Logger log = LoggerFactory.getLogger(ResourceConstrainingQueue.class);
 
     public static <T> ResourceConstrainingQueueBuilder<T> builder() {
         return new ResourceConstrainingQueueBuilder<>();
     }
 
-    private final ExecutorService fillThread;
     private boolean failAfterAttemptThresholdReached = false;
 
     public static final long DEFAULT_POLL_FREQ_MS = 100L;
@@ -99,55 +57,21 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
     private Counter pendingItems = null;
     private Meter sleeps = null;
 
-    final private boolean strict;
+
     // this is the lock we'll use if buffer == true or strict == true.
     ReentrantLock takeLock = new ReentrantLock(true);
 
-    final private boolean shouldBuffer;
-
-    // buffered item, used if shouldBuffer == true
-    private volatile T buffer;
-
-    // We also don't want a blocking read (take(), poll(timeout)) to block a non-blocking poll() while we wait for
-    // another queue read operation to complete (when filling == true). Waiting on this condition allows us to
-    // release the lock while we wait for other queue-reading operations to complete.
-    private Condition fillComplete = takeLock.newCondition();
-
     /**
-     * Build a ResourceConstrainingQueue using all default options.
-     * If you want to override some defaults, but not all, use the ResourceConstrainingQueueBuilder; it's much easier.
+     * Use the static {@link #builder()} method to construct a ResourceConstrainingQueue
      */
-    public ResourceConstrainingQueue() {
-        this(new LinkedBlockingQueue<>(), TaskTrackers.defaultTaskTracker(), DEFAULT_POLL_FREQ_MS);
-    }
-
-    public ResourceConstrainingQueue(BlockingQueue<T> delegate, TaskTracker<T> taskTracker, long defaultPollFreq) {
-        this(delegate, ConstraintStrategies.defaultConstraintStrategy(taskTracker), defaultPollFreq, true, taskTracker);
-    }
-
-    public ResourceConstrainingQueue(BlockingQueue<T> delegate, ConstraintStrategy<T> constraintStrategy, long retryFrequencyMS, boolean strict) {
-        this(delegate, constraintStrategy, retryFrequencyMS, strict, null);
-    }
-
-    public ResourceConstrainingQueue(BlockingQueue<T> delegate, ConstraintStrategy<T> constraintStrategy, long retryFrequencyMS, boolean strict, TaskTracker<T> taskTracker) {
-        this(delegate, constraintStrategy, retryFrequencyMS, strict, true, taskTracker, DEFAULT_CONSTRAINED_ITEM_THRESHOLD_MS);
-    }
-
-    public ResourceConstrainingQueue(BlockingQueue<T> delegate, ConstraintStrategy<T> constraintStrategy, long retryFrequencyMS, boolean strict, boolean shouldBuffer, TaskTracker<T> taskTracker, long constrainedItemThresholdMS) {
+    protected ResourceConstrainingQueue(BlockingQueue<T> delegate, ConstraintStrategy<T> constraintStrategy, long retryFrequencyMS, TaskTracker<T> taskTracker, long constrainedItemThresholdMS) {
 
         this.delegate = delegate;
         this.retryFrequencyMS = retryFrequencyMS;
         this.constraintStrategy = constraintStrategy;
         this.taskTracker = taskTracker;
-        this.strict = strict;
         this.constrainedItemThresholdMS = constrainedItemThresholdMS;
         this.taskAttemptCounter = new TaskAttemptCounter();
-        this.shouldBuffer = shouldBuffer;
-        if (this.shouldBuffer) {
-            fillThread = Executors.newSingleThreadExecutor(new ResourceConstrainingQueues.NameableDaemonThreadFactory("queue-fill-thread-%d"));
-        } else {
-            fillThread = null;
-        }
     }
 
     protected T trackIfNecessary(T item) {
@@ -193,223 +117,43 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
      * Retrieves and removes the head of this queue.  This method differs
      * from {@link #poll poll} only in that it throws an exception if this
      * queue is empty.
-     *
+     * <p>
      * See the concurrency notes in the class-level javadoc for important notes about the accuracy and threadsafety of
      * this method.
      *
      * @return the head of this queue
-     * @throws NoSuchElementException if this queue is empty
+     * @throws NoSuchElementException         if this queue is empty
      * @throws InsufficientResourcesException if we do not have sufficient resources for the next element
      */
     @Override
     public T remove() {
-        if (shouldBuffer) {
-            return getItemWithBuffer(() -> {
-                throw new NoSuchElementException();
-            }, (n) -> {
-                throw new InsufficientResourcesException(n);
-            });
-        } else {
-            return getItemWithoutBuffer(Queue::remove, () -> {
-                throw new NoSuchElementException();
-            }, (n) -> {
-                throw new InsufficientResourcesException(n);
-            });
-        }
+        return getItemNonBlocking(() -> {
+            throw new NoSuchElementException();
+        }, (n) -> {
+            throw new InsufficientResourcesException(n);
+        });
     }
 
     /**
-     * Abstracting out the poll, take, and remove methods, for the non-buffering use case.
-     * @param getFromDelegate
-     * @param onNoElementAvailable
-     * @param onInsufficientResources
-     * @return
-     */
-    private T getItemWithoutBuffer(Function<BlockingQueue<T>, T> getFromDelegate, Supplier<T> onNoElementAvailable, Function<T, T> onInsufficientResources) {
-        boolean locking = shouldLock();
-        try {
-            if (locking) {
-                // perf note: synchronized(obj) and StripedLock are both more efficient than ReentrantLock for
-                // most cases, but using ReentrantLock makes the "optionally strict" logic much simpler, and the
-                // differences are not significant in this application.
-                takeLock.lock();
-            }
-            T nextItem = delegate.peek();
-            if (nextItem == null) {
-                return onNoElementAvailable.get();
-            } else if (shouldReturn(nextItem)) {
-                // note that if nextItem == null, remove() here will throw an exception.
-                // Note that we might be returning a *different item* than nextItem if we have multiple threads
-                // accessing this concurrently and strict == false!
-                // When strict == false, we're intentionally taking that risk to avoid locking.
-                return trackIfNecessary(getFromDelegate.apply(delegate));
-            } else {
-               return onInsufficientResources.apply(nextItem);
-            }
-        } finally {
-            if (locking) {
-                takeLock.unlock();
-            }
-        }
-
-    }
-
-    /**
-     * Get an item, using an intermediate buffer to store items that we do not yet have the resources to execute.
-     * Ideally, we want to pull off no more than 1 task from the queue at a time before we know for sure we have the
-     * resources to execute it. That way if the queue is backed by a distributed queue, for example, we ensure as many
-     * items are available for other workers as possible.
+     * Get an item if it is available, or the value of onNoElementAvailable if there is nothing available, or onInsufficientResources
+     * if there is an item available but there are insufficient resources.
      *
-     * There's some duplication between this and pollWithBuffer(timeout), but behavior is sufficiently different in the
-     * non-blocking case that it seemed clearer to keep them separate.
-     * @param onNoElementAvailable what to return when there's nothing available
+     * @param onNoElementAvailable    what to return when there's nothing available
      * @param onInsufficientResources what to return when there's something available, but we don't have sufficient
      *                                resources to execute it.
      * @return an item if present, or the value returned by the appropriate input function/supplier otherwise
      */
-    private T getItemWithBuffer(Supplier<T> onNoElementAvailable, Function<T, T> onInsufficientResources) {
-        final ReentrantLock lock = this.takeLock;
-        lock.lock();
-        try {
-            // pull the next item into the buffer if possible (without waiting)
-            fillBufferIfEmpty();
-            if (buffer == null) return onNoElementAvailable.get();
-            else if (constraintStrategy.shouldReturn(buffer)) {
-                T item = buffer;
-                buffer = null;
-                return item;
-            } else {
-                // there's an item in the buffer, but we shouldn't return it yet
-                return onInsufficientResources.apply(buffer);
-            }
-        } finally {
-            lock.unlock();
-        }
-    }
-
+    protected abstract T getItemNonBlocking(Supplier<T> onNoElementAvailable, Function<T, T> onInsufficientResources);
 
     /**
-     * Get an item, using an intermediate buffer to store items that we do not yet have the resources to execute. Uses
-     * a separate thread to poll the underlying queue in order to avoid blocking other threads.
-     *
-     * Ideally, we want to pull off no more than 1 task from the queue at a time before we know for sure we have the
-     * resources to execute it. That way if the queue is backed by a distributed queue, for example, we ensure as many
-     * items are available for other workers as possible.
-     *
-     * There's some duplication between this and getWithBuffer(timeout), but behavior is sufficiently different in the
-     * non-blocking case that it seemed clearer to keep them separate.
-     *
-     * If timeout < 0, it is treated as "no timeout"
+     * Get an item, blocking as necessary until one is available and ready to execute. If timeout >= 0, we will wait at
+     * most timeout (on a best-effort basis). If timeout < 0, this method blocks indefinitely.
      *
      * @param timeout if < 0, it is treated as "no timeout". Otherwise, treated as a best-effort max wait.
      * @return an item if present, or the value returned by the appropriate input function/supplier otherwise
      */
-    private T pollWithBuffer(long timeout, TimeUnit unit) throws InterruptedException {
-        // we have to do a little extra work here because we may have to wait for some time before we have enough resources.
-        // We make a reasonable effort to ensure that the combined wait-until-resources-are-available and poll time don't
-        // exceed the desired timeout.
-        final long startNanos = System.nanoTime();
-        final Optional<Long> timeoutNanos;
-        if (timeout >= 0) {
-            timeoutNanos = Optional.of(unit.toNanos(timeout));
-        } else {
-            timeoutNanos = Optional.empty();
-        }
-        final ReentrantLock lock = this.takeLock;
-        // loop only until timeout, if timeout is present
-        while (!timeoutNanos.isPresent() || remainingTime(startNanos, timeoutNanos.get()) > 0) {
-            lock.lockInterruptibly();
-            try {
-                log.debug("Attempting to fill buffer");
-                fillBufferIfEmpty(timeoutNanos.map((t) -> remainingTime(startNanos, t)));
-                log.debug("Fill buffer complete");
-                if (buffer == null) {
-                    // either there was no item available within the timeout, or we were signaled spuriously, or someone
-                    // else grabbed our buffered item before we reacquired the lock
-                    log.debug("..but nothing available");
-                    // loop back around again. If we've hit our timeout, we'll exit out of the loop.
-                    continue;
-                }
+    protected abstract T getItemBlocking(long timeout, TimeUnit unit) throws InterruptedException;
 
-                // ok, now let's see if we have the resources to execute it.
-                if (constraintStrategy.shouldReturn(buffer)) {
-                    T item = buffer;
-                    buffer = null;
-                    return item;
-                } else {
-                    // there's something in the buffer, but we don't yet have the resources to execute it.
-                    // Fall through out of the try block (so we release the lock, so that other threads don't block
-                    // for non-blocking calls) and sleep, and try again.
-                    if (shouldFail(buffer)) {
-                        T item = buffer;
-                        buffer = null;
-                        return failForTooMayTries(item);
-                    }
-                }
-            } finally {
-                lock.unlock();
-            }
-            sleep();
-        }
-        // if we get here, then nothing was available within the specified wait time.
-        return null;
-    }
-
-
-    /** must have lock before calling this method! */
-    private void fillBufferIfEmpty(Optional<Long> timeoutNanos) throws InterruptedException {
-        if (buffer == null && timeoutNanos.orElse(1L) > 0) {
-            // we do this in a separate thread so that we can release our lock (via fillComplete.await()). That
-            // prevents this blocking poll() call from blocking other non-blocking reads.
-            fillThread.execute(() -> {
-                ReentrantLock lock = this.takeLock;
-                log.debug("Fill thread waiting for lock");
-                lock.lock();
-                log.debug("Fill thread acquired lock");
-                try {
-                    if (buffer == null) {
-                        log.debug("Fill thread: buffer empty, polling underlying queue");
-                        if (timeoutNanos.isPresent()) {
-                            buffer = delegate.poll(timeoutNanos.get(), TimeUnit.NANOSECONDS);
-                        } else {
-                            buffer = delegate.take();
-                        }
-                        log.debug("Fill thread: poll complete. Buffer is now {}", buffer);
-                    }
-                } catch (InterruptedException e) {
-                    // typically happens because we're shutting down. Release our lock and move on.
-                    log.warn("Interrupted while waiting to read from the underlying queue");
-                } finally {
-                    // whether it succeeded or not, wake somebody up to check on it.
-                    fillComplete.signal();
-                    lock.unlock();
-                }
-            });
-            // we don't just wait for the future, because we want to release our locks.
-            if (timeoutNanos.isPresent()) {
-                fillComplete.await(timeoutNanos.get(), TimeUnit.NANOSECONDS);
-            } else {
-                fillComplete.await();
-            }
-        }
-    }
-
-    /** must have lock before calling this method */
-    private void fillBufferIfEmpty() {
-        if (buffer == null) {
-            buffer = delegate.poll();
-            fillComplete.signal();
-        }
-    }
-
-    private long remainingTime(long startNanos, long timeoutNanos) {
-        long elapsed = System.nanoTime() - startNanos;
-        return timeoutNanos - elapsed;
-    }
-
-    private boolean shouldLock() {
-        return strict;
-    }
 
     protected boolean shouldReturn(T nextItem) {
 
@@ -428,7 +172,7 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
     /**
      * Retrieves and removes the head of this queue,
      * or returns {@code null} if this queue is empty, or if we do not yet have sufficient resources for the next item.
-     *
+     * <p>
      * See the concurrency notes in the class-level javadoc for important notes about the accuracy and threadsafety of
      * this method.
      *
@@ -436,21 +180,17 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
      */
     @Override
     public T poll() {
-        if (shouldBuffer) {
-            return getItemWithBuffer(() -> null, (n) -> null);
-        } else {
-            return getItemWithoutBuffer(Queue::poll, () -> null, (n) -> null);
-        }
+        return getItemNonBlocking(() -> null, (n) -> null);
     }
 
 
     /**
      * Retrieves and removes the head of this queue, waiting if necessary
      * until an element becomes available.
-     *
+     * <p>
      * See the concurrency notes in the class-level javadoc for important notes about the accuracy and threadsafety of
      * this method.
-     *
+     * <p>
      * Also note that, since this implementation depends on peek(), it is implemented using a periodic poll of the
      * underlying queue, rather than calling queue.take() directly. The poll frequency can be set as a constructor argument.
      * TODO: exponential decay on the poll frequency
@@ -475,8 +215,9 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
     /**
      * If you would like to implement custom logic after an item has failed too many resource checks, override this method.
      * Some options are to call "cancel()" on tasks, register exceptions, requeue, etc.
-     *
+     * <p>
      * Note that the result of this method will be returned to the original caller.
+     *
      * @param item
      * @return
      */
@@ -487,7 +228,7 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
     /**
      * If we decide we want pluggable behavior here, take a look at LMAX Disruptor's WaitStrategy classes
      */
-    private void sleep() throws InterruptedException {
+    protected void sleep() throws InterruptedException {
         if (sleeps != null) {
             sleeps.mark();
         }
@@ -497,52 +238,20 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
     /**
      * See the concurrency notes in the class-level javadoc for important notes about the accuracy and threadsafety of
      * this method.
-     *
+     * <p>
      * Also note that, since this implementation depends on peek(), it is implemented using a periodic poll of the
      * underlying queue, rather than calling queue.take() directly. The poll frequency can be set as a constructor argument.
      *
      * @return the head of this queue, or {@code null} if the
-     *         specified waiting time elapses before an element which we have the resources for is available
+     * specified waiting time elapses before an element which we have the resources for is available
      * @see #poll()
      */
     @Override
     public T poll(long timeout, TimeUnit unit) throws InterruptedException {
-        if (shouldBuffer) {
-            return pollWithBuffer(timeout, unit);
-        } else {
-            return pollWithoutBuffer(timeout, unit);
-        }
+        return getItemBlocking(timeout, unit);
     }
 
-
-    private T pollWithoutBuffer(long timeout, TimeUnit unit) throws InterruptedException {
-        // we have to do a little extra work here because we may have to wait for some time before we have enough resources.
-        // We make a reasonable effort to ensure that the combined wait-until-resources-are-available and poll time don't
-        // exceed the desired timeout.
-        long totalSleepNanos = 0;
-        long startNanos = System.nanoTime();
-        long timeoutNanos = unit.toNanos(timeout);
-        // we treat "timeoutNanos < 0" as "no limit"
-        while (timeoutNanos < 0 || totalSleepNanos < timeoutNanos) {
-            try {
-                return getItemWithoutBuffer(Queue::poll, () -> {
-                    throw new NoSuchElementException();
-                }, (nextItem) -> {
-                    if (shouldFail(nextItem)) return failForTooMayTries(nextItem);
-                    else return null;
-                });
-            } catch (NoSuchElementException e) {
-                // alas, either nothing available or we don't have the resources to execute it. Sleep, and try again.
-                // sleep and retry
-                sleep();
-                totalSleepNanos = System.nanoTime() - startNanos;
-            }
-        }
-        // if we got here, we timed out.
-        return null;
-    }
-
-    private boolean shouldFail(T nextItem) {
+    protected boolean shouldFail(T nextItem) {
         if (taskAttemptCounter != null) {
             //increment number of tries for this item
             int attempts = taskAttemptCounter.incrementConstrained(nextItem);
@@ -879,6 +588,7 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
 
         /**
          * The maximum amount of time to wait until there are sufficient resources for an item.
+         *
          * @param timeLimit
          * @param timeUnit
          * @return
@@ -901,7 +611,11 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
             if (useTaskTracker && builderTaskTracker == null) {
                 builderTaskTracker = TaskTrackers.defaultTaskTracker();
             }
-            return new ResourceConstrainingQueue<T>(d, cs, pollfreq, builderStrict, useBuffer, builderTaskTracker, noResourcesTimeLimit);
+            if (this.useBuffer) {
+                return new BufferingResourceConstrainingQueue<>(d, cs, pollfreq, builderTaskTracker, noResourcesTimeLimit);
+            } else {
+                return new PeekingResourceConstrainingQueue<>(d, cs, pollfreq, builderStrict, builderTaskTracker, noResourcesTimeLimit);
+            }
         }
 
     }
@@ -935,10 +649,11 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
 
     public static class InsufficientResourcesException extends NoSuchElementException {
         public InsufficientResourcesException(Object o) {
-            super("Insufficient resources to execute "+ o.toString());
+            super("Insufficient resources to execute " + o.toString());
         }
 
         // sometimes you feel like an arg... sometimes you don't.
-        public InsufficientResourcesException() { }
+        public InsufficientResourcesException() {
+        }
     }
 }

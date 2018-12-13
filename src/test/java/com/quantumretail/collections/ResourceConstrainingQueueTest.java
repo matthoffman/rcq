@@ -51,12 +51,10 @@ public class ResourceConstrainingQueueTest {
         // ResourceConstrainingQueue<Runnable> queue = ResourceConstrainingQueues.defaultQueue(thresholds);
 
         TaskTracker<Runnable> taskTracker = TaskTrackers.defaultTaskTracker();
-        ResourceConstrainingQueue<Runnable> queue = new ResourceConstrainingQueue<Runnable>(
-                new LinkedBlockingQueue<Runnable>(),
-                createConstraintStrategies(thresholds, taskTracker, scheduledExecutorService),
-                ResourceMonitors.DEFAULT_UPDATE_FREQ,
-                true,
-                taskTracker);
+        ResourceConstrainingQueue<Runnable> queue = ResourceConstrainingQueue.<Runnable>builder()
+                .withConstraintStrategy(createConstraintStrategies(thresholds, taskTracker, scheduledExecutorService))
+                .withTaskTracker(taskTracker)
+                .build();
 
         queue.registerMetrics(metricRegistry, "queue");
 
@@ -129,9 +127,9 @@ public class ResourceConstrainingQueueTest {
         }
     }
 
-    private class NoResource_RCQ<T> extends ResourceConstrainingQueue<T> {
-        public NoResource_RCQ(BlockingQueue<T> delegate, ConstraintStrategy<T> constraintStrategy, long retryFrequencyMS, boolean strict, boolean shouldBuffer, TaskTracker<T> taskTracker, long constrainedItemThreshold) {
-            super(delegate, constraintStrategy, retryFrequencyMS, strict, shouldBuffer, taskTracker, constrainedItemThreshold);
+    private class NoResource_RCQ<T> extends PeekingResourceConstrainingQueue<T> {
+        public NoResource_RCQ(BlockingQueue<T> delegate, ConstraintStrategy<T> constraintStrategy, long retryFrequencyMS, boolean strict, TaskTracker<T> taskTracker, long constrainedItemThreshold) {
+            super(delegate, constraintStrategy, retryFrequencyMS, strict, taskTracker, constrainedItemThreshold);
         }
 
         @Override
@@ -165,7 +163,7 @@ public class ResourceConstrainingQueueTest {
             service.scheduleAtFixedRate(new ScalingFactorAdjuster(measured, predictive, loadPredictor, 10, TimeUnit.SECONDS), 1, 10, TimeUnit.SECONDS);
         }
 
-        return new SimplePredictiveConstraintStrategy<Runnable>(
+        return new SimplePredictiveConstraintStrategy<>(
                 new HighestValueAggregateResourceMonitor(predictive, measured),
                 thresholds,
                 loadPredictor
