@@ -6,7 +6,7 @@ import org.junit.Test;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
-import static junit.framework.Assert.assertEquals;
+import static org.junit.Assert.assertEquals;
 
 /**
  * This class tests EWMAMonitor and EWMA together because the classes used to be together.
@@ -24,8 +24,8 @@ public class EWMAMonitorTest {
         EWMAMonitor monitor = new EWMAMonitor(rm, new EWMA(10, TimeUnit.MILLISECONDS, clock));
 
         Map<String, Double> load = monitor.getLoad();
-        assertEquals(1.0, load.get("CPU"));
-        assertEquals(0.5, load.get("MEM"));
+        assertEquals(1.0, load.get("CPU"), DELTA);
+        assertEquals(0.5, load.get("MEM"), DELTA);
 
         // 1 ms later, give an update.
         rm.map.put("CPU", 2.0);
@@ -61,13 +61,13 @@ public class EWMAMonitorTest {
         EWMAMonitor monitor2 = new EWMAMonitor(rm, new EWMA(10, TimeUnit.MILLISECONDS, clock));
 
         Map<String, Double> load = monitor1.getLoad();
-        assertEquals(1.0, load.get("CPU"));
-        assertEquals(0.5, load.get("MEM"));
+        assertEquals(1.0, load.get("CPU"), DELTA);
+        assertEquals(0.5, load.get("MEM"), DELTA);
 
         // monitor2 has the same inputs, so of course it should be the same:
         load = monitor2.getLoad();
-        assertEquals(1.0, load.get("CPU"));
-        assertEquals(0.5, load.get("MEM"));
+        assertEquals(1.0, load.get("CPU"), DELTA);
+        assertEquals(0.5, load.get("MEM"), DELTA);
 
         // things have spiked. Or something...
         rm.map.put("CPU", 2.0);
@@ -101,21 +101,21 @@ public class EWMAMonitorTest {
 
         Map<String, Double> load = monitor.getLoad();
         assertEquals(3, load.size()); // it's 3 because of the "alpha" value.
-        assertEquals(1.0, load.get("CPU"));
-        assertEquals(0.5, load.get("MEM"));
+        assertEquals(1.0, load.get("CPU"), DELTA);
+        assertEquals(0.5, load.get("MEM"), DELTA);
 
         load = monitor.getLoad();
-        assertEquals(1.0, load.get("CPU"));
-        assertEquals(0.5, load.get("MEM"));
+        assertEquals(1.0, load.get("CPU"), DELTA);
+        assertEquals(0.5, load.get("MEM"), DELTA);
 
         load = monitor.getLoad();
-        assertEquals(1.0, load.get("CPU"));
-        assertEquals(0.5, load.get("MEM"));
+        assertEquals(1.0, load.get("CPU"), DELTA);
+        assertEquals(0.5, load.get("MEM"), DELTA);
 
         load = monitor.getLoad();
         assertEquals(3, load.size()); // it's 3 because of the "alpha" value.
-        assertEquals(1.0, load.get("CPU"));
-        assertEquals(0.5, load.get("MEM"));
+        assertEquals(1.0, load.get("CPU"), DELTA);
+        assertEquals(0.5, load.get("MEM"), DELTA);
     }
 
     @Test

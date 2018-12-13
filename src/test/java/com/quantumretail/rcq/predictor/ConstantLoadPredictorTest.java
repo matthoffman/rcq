@@ -6,7 +6,8 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
-import static junit.framework.Assert.assertEquals;
+import static com.quantumretail.resourcemon.SimplePredictiveResourceMonitorTest.DELTA;
+import static org.junit.Assert.assertEquals;
 
 /**
  * TODO: document me.
@@ -16,11 +17,11 @@ public class ConstantLoadPredictorTest {
 
     @Test
     public void testScalingFactor_happyPath() throws Exception {
-        Map<String, Double> load = new HashMap<String, Double>();
+        Map<String, Double> load = new HashMap<>();
         load.put("CPU", 0.3);
         load.put("MEM", 0.2);
 
-        Map<String, Double> scale = new HashMap<String, Double>();
+        Map<String, Double> scale = new HashMap<>();
         scale.put("CPU", 2.0);
         scale.put("MEM", 2.0);
 
@@ -28,18 +29,18 @@ public class ConstantLoadPredictorTest {
         Map<String, Double> results = loadPredictor.predictLoad(null);
 
         assertEquals(2, results.size());
-        assertEquals(.15, results.get("CPU"));
-        assertEquals(.1, results.get("MEM"));
+        assertEquals(.15, results.get("CPU"), DELTA);
+        assertEquals(.1, results.get("MEM"), DELTA);
 
     }
 
     @Test
     public void testScalingFactor_reverse() throws Exception {
-        Map<String, Double> load = new HashMap<String, Double>();
+        Map<String, Double> load = new HashMap<>();
         load.put("CPU", 0.3);
         load.put("MEM", 0.2);
 
-        Map<String, Double> scale = new HashMap<String, Double>();
+        Map<String, Double> scale = new HashMap<>();
         scale.put("CPU", 0.5);
         scale.put("MEM", 0.5);
 
@@ -47,19 +48,19 @@ public class ConstantLoadPredictorTest {
         Map<String, Double> results = loadPredictor.predictLoad(null);
 
         assertEquals(2, results.size());
-        assertEquals(.6, results.get("CPU"));
-        assertEquals(.4, results.get("MEM"));
+        assertEquals(.6, results.get("CPU"), DELTA);
+        assertEquals(.4, results.get("MEM"), DELTA);
 
     }
 
     @Test
     public void testNonOverlapping() throws Exception {
 
-        Map<String, Double> load = new HashMap<String, Double>();
+        Map<String, Double> load = new HashMap<>();
         load.put("CPU", 0.3);
         load.put("MEM", 0.2);
 
-        Map<String, Double> scale = new HashMap<String, Double>();
+        Map<String, Double> scale = new HashMap<>();
         scale.put("CPU", 2.0);
         scale.put("__FOO", 0.5);
 
@@ -67,14 +68,14 @@ public class ConstantLoadPredictorTest {
         Map<String, Double> results = loadPredictor.predictLoad(null);
 
         assertEquals(2, results.size());
-        assertEquals(.15, results.get("CPU"));
-        assertEquals(.2, results.get("MEM"));
+        assertEquals(.15, results.get("CPU"), DELTA);
+        assertEquals(.2, results.get("MEM"), DELTA);
     }
 
     @Test
     public void test_null() throws Exception {
 
-        Map<String, Double> load = new HashMap<String, Double>();
+        Map<String, Double> load = new HashMap<>();
         load.put("CPU", 0.3);
         load.put("MEM", 0.2);
 
@@ -82,35 +83,35 @@ public class ConstantLoadPredictorTest {
         Map<String, Double> results = loadPredictor.predictLoad(null);
 
         assertEquals(2, results.size());
-        assertEquals(.3, results.get("CPU"));
-        assertEquals(.2, results.get("MEM"));
+        assertEquals(.3, results.get("CPU"), DELTA);
+        assertEquals(.2, results.get("MEM"), DELTA);
     }
 
     @Test
     public void test_blank() throws Exception {
 
-        Map<String, Double> load = new HashMap<String, Double>();
+        Map<String, Double> load = new HashMap<>();
         load.put("CPU", 0.3);
         load.put("MEM", 0.2);
 
-        ConstantLoadPredictor loadPredictor = new ConstantLoadPredictor(load, Collections.<String, Double>emptyMap());
+        ConstantLoadPredictor loadPredictor = new ConstantLoadPredictor(load, Collections.emptyMap());
         Map<String, Double> results = loadPredictor.predictLoad(null);
 
         assertEquals(2, results.size());
-        assertEquals(.3, results.get("CPU"));
-        assertEquals(.2, results.get("MEM"));
+        assertEquals(.3, results.get("CPU"), DELTA);
+        assertEquals(.2, results.get("MEM"), DELTA);
     }
 
 
     @Test
     public void test_zeroScale() throws Exception {
 
-        Map<String, Double> load = new HashMap<String, Double>();
+        Map<String, Double> load = new HashMap<>();
         load.put("CPU", 0.3);
         load.put("MEM", 0.2);
 
 
-        Map<String, Double> scale = new HashMap<String, Double>();
+        Map<String, Double> scale = new HashMap<>();
         scale.put("CPU", 0.0);
         scale.put("MEM", 2.0);
 
@@ -119,8 +120,8 @@ public class ConstantLoadPredictorTest {
         Map<String, Double> results = loadPredictor.predictLoad(null);
 
         assertEquals(2, results.size());
-        assertEquals(.3, results.get("CPU"));
-        assertEquals(0.1, results.get("MEM"));
+        assertEquals(.3, results.get("CPU"), DELTA);
+        assertEquals(0.1, results.get("MEM"), DELTA);
     }
 //
 //

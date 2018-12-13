@@ -5,7 +5,7 @@ import org.junit.Test;
 
 import java.util.concurrent.TimeUnit;
 
-import static junit.framework.Assert.assertEquals;
+import static org.junit.Assert.assertEquals;
 
 /**
  * The EWMAMonitorTest already covers most of EWMA quite well. This test mainly covers some implementation details.

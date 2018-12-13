@@ -5,7 +5,7 @@ import com.quantumretail.constraint.ConstraintStrategies;
 import com.quantumretail.constraint.ConstraintStrategy;
 import com.quantumretail.rcq.predictor.TaskTracker;
 import com.quantumretail.rcq.predictor.TaskTrackers;
-import com.yammer.metrics.core.*;
+import com.codahale.metrics.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,6 +16,8 @@ import java.util.NoSuchElementException;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+
+import static com.codahale.metrics.MetricRegistry.name;
 
 /**
  * Note that this resource-constraining behavior ONLY occurs on {@link #poll()}a, {@link #take()} and {@link #remove()}.
@@ -607,19 +609,14 @@ public class ResourceConstrainingQueue<T> implements BlockingQueue<T>, MetricsAw
         return constraintStrategy;
     }
 
-    public void registerMetrics(MetricsRegistry metrics, String name) {
-        metrics.newGauge(new MetricName(ResourceConstrainingQueue.class, name, "size"),
-                new Gauge<Integer>() {
-                    @Override
-                    public Integer value() {
-                        return size();
-                    }
-                });
+    public void registerMetrics(MetricRegistry metrics, String name) {
+        metrics.register(name(ResourceConstrainingQueue.class, name, "size"), (Gauge<Integer>) this::size);
 
-        pendingItems = metrics.newCounter(new MetricName(ResourceConstrainingQueue.class, name, "pending-items"));
-        trackedRemovals = metrics.newMeter(new MetricName(ResourceConstrainingQueue.class, name, "remove-poll-take"), "item", TimeUnit.SECONDS);
-        additions = metrics.newMeter(new MetricName(ResourceConstrainingQueue.class, name, "add-offer-put"), "item", TimeUnit.SECONDS);
-        sleeps = metrics.newMeter(new MetricName(ResourceConstrainingQueue.class, "sleeps"), "item", TimeUnit.SECONDS);
+
+        pendingItems = metrics.counter(name(ResourceConstrainingQueue.class, name, "pending-items"));
+        trackedRemovals = metrics.meter(name(ResourceConstrainingQueue.class, name, "remove-poll-take"));
+        additions = metrics.meter(name(ResourceConstrainingQueue.class, name, "add-offer-put"));
+        sleeps = metrics.meter(name(ResourceConstrainingQueue.class, "sleeps"));
 
         if (this.constraintStrategy instanceof MetricsAware) {
             ((MetricsAware) constraintStrategy).registerMetrics(metrics, name);
