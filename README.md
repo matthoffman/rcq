@@ -2,18 +2,58 @@
 
 ## What is RCQ? ##
 
-RCQ ("Resource Constraining Queue") is a set of utilities for building work queues that try to adapt to the available 
-resources on the worker. It is centered around a simple [java.util.concurrent.BlockingQueue](https://docs.oracle.com/javase/8/docs/api/?java/util/concurrent/BlockingQueue.html) wrapper, but it also contains a number of 
+RCQ is an experiment in ways to build task execution frameworks (local and distributed) that handle tasks with varying 
+resource requirements across machines with varying resources. 
+It began while I was working on an application that was deployed on-premises at customer sites where both hardware and 
+task resource requirements could vary widely: some tasks were CPU-bound, some were memory-bound, some were IO-bound. We
+also wanted a way to handle hybrid environments better, which often meant a mix of onsite and cloud servers with 
+different resource profiles and performance characteristics. 
+Manually configuring thread pool sizes or task limits per-machine (or similar manual tuning) was far from ideal. I 
+was looking for ways to adapt execution to each environment automatically, without heavyweight infrastructure 
+requirements like with Mesos or YARN (which were non-starters for our existing customers), 
+
+RCQ is an attempt at putting that resource management within the task queue itself: basically, it extends the typical
+definition of `taskQueue.take()` from "is there available work?" to "is there available work _that I have the resources
+to execute_?" It is centered around a simple [java.util.concurrent.BlockingQueue](https://docs.oracle.com/javase/8/docs/api/?java/util/concurrent/BlockingQueue.html) wrapper, but it also contains a number of 
 utility classes that could be used independently.
 
-The definition of "available resources" is left to an implementation of a simple [interface](https://github.com/matthoffman/rcq/blob/master/src/main/java/com/quantumretail/constraint/ConstraintStrategy.java); it is easy to
-extend RCQ to fit any definition of "available resource" you can imagine. Out of the box, RCQ can attempt to adapt based on: 
+Often this logic is placed in the worker itself, but there potential advantages in locating it in (or near) the queue: 
+ * workers can focus on how to execute the task, rather than whether they can execute it (and what to do if they pull a 
+ task off the queue that they don't have available resources to execute). 
+ * tasks can (potentially) stay on the queue until they can be executed, for more even task distribution and allowing you
+ to better take advantage of any HA guarantees that the queue provides.
+ * the queue could (potentially) do scheduling optimizations based on available resources (handing out smaller tasks that
+ the given worker *can* execute rather than larger tasks that it can't).
+
+That said, the resource measuring and constraint evaluation logic in RCQ could be reused within the workers instead, if
+desired.
+
+The definition of "available resources" in RCQ is left to an implementation of a simple [interface](https://github.com/matthoffman/rcq/blob/master/src/main/java/com/quantumretail/constraint/ConstraintStrategy.java); it is easy to
+extend RCQ to fit any definition of "available resource" you can imagine. Out of the box, RCQ attempts to measure:
  * System load average
  * CPU utilization
  * Available JVM heap memory 
-    
+
+## Alternatives and prior art ##
+
+A lot of work has been done on this in the context of large-scale cluster computing environments. A couple of notes: 
+
+ * YARN and Mesos have resource allocation at their core. As an over-generalization, tasks (or their job managers) have 
+ to declare up-front what resources they need, and then the frameworks attempt to place those tasks on the appropriate 
+ workers. They're both widely used, and as battle-tested as frameworks come, and there is a huge volume of literature
+ dedicated to optimizing them for various workloads. 
+ * Researchers at Microsoft and Brown University did some interesting work on hybrid centralized/decentralized task 
+distribution that includes resource-aware scheduling: [Efficient Queue Management for Cluster Scheduling](http://cs.brown.edu/people/jrasley/papers/eurosys16-yaq-final.pdf) (Rasley et al., EuroSys '16, 2016).
+    * This also references (and builds on) [Mercury](https://dl.acm.org/citation.cfm?id=2813803), another hybrid approach.
+
+RCQ aims to be at most a building block in a comprehensive system, focusing just on the worker queue.
+
 ## Why RCQ? ##
 
+Well, as it stands right now, you probably don't want to use RCQ. While it was used in production in its original 
+context (and may still be?), the library as it stands isn't what I would call production-ready for general use. But the 
+general approach may be worth further investigation: 
+ 
 Often, when implementing producer-consumer patterns, we end up setting the number of consumers based on some heuristic: 
 maybe it's some multiplier on the number of CPUs, or maybe it's some default that is left to the user to configure. 
 Sometimes this works fine -- with a perfectly CPU-bound workload on an otherwise unloaded machine, `# workers == # CPUs` 
