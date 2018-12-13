@@ -47,15 +47,8 @@ import java.util.function.Supplier;
 public class BufferingResourceConstrainingQueue<T> extends ResourceConstrainingQueue<T> {
     private static final Logger log = LoggerFactory.getLogger(BufferingResourceConstrainingQueue.class);
 
-    // we poll the underlying queue in a separate thread, so that we can avoid blocking other reads
-    private final ExecutorService fillThread = Executors.newSingleThreadExecutor(new ResourceConstrainingQueues.NameableDaemonThreadFactory("queue-fill-thread-%d"));
     // buffered item, used if shouldBuffer == true
     private volatile T buffer;
-
-    // We also don't want a blocking read (take(), poll(timeout)) to block a non-blocking poll() while we wait for
-    // another queue read operation to complete (when filling == true). Waiting on this condition allows us to
-    // release the lock while we wait for other queue-reading operations to complete.
-    private Condition fillComplete = takeLock.newCondition();
 
     /**
      * Use {@link ResourceConstrainingQueue#builder()} to construct a queue.
@@ -106,8 +99,14 @@ public class BufferingResourceConstrainingQueue<T> extends ResourceConstrainingQ
 
 
     /**
-     * Get an item, using an intermediate buffer to store items that we do not yet have the resources to execute. Uses
-     * a separate thread to poll the underlying queue in order to avoid blocking other threads.
+     * Get an item, using an intermediate buffer to store items that we do not yet have the resources to execute.
+     * <p>
+     * This used to be implemented with a separate thread and a monitor to ensure that we weren't blocking during a poll(),
+     * but I decided to go with a simple polling approach, like in PeekingResourceConstrainingQueue. It's much simpler
+     * and easier to read, at the expense of a slightly worse performance profile and a bit of poll delay. We were already
+     * polling in the case where the item had been fetched, but we were waiting for available resources to execute it.
+     * So the tradeoff seemed worth it, but we can go back to the separate thread if necessary.
+     *
      * <p>
      * Ideally, we want to pull off no more than 1 task from the queue at a time before we know for sure we have the
      * resources to execute it. That way if the queue is backed by a distributed queue, for example, we ensure as many
@@ -137,13 +136,13 @@ public class BufferingResourceConstrainingQueue<T> extends ResourceConstrainingQ
         while (!timeoutNanos.isPresent() || remainingTime(startNanos, timeoutNanos.get()) > 0) {
             lock.lockInterruptibly();
             try {
-                log.debug("Attempting to fill buffer");
-                fillBufferIfEmpty(timeoutNanos.map((t) -> remainingTime(startNanos, t)));
-                log.debug("Fill buffer complete");
+                log.trace("Attempting to fill buffer");
+                fillBufferIfEmpty();
+                log.trace("Fill buffer complete");
                 if (buffer == null) {
                     // either there was no item available within the timeout, or we were signaled spuriously, or someone
                     // else grabbed our buffered item before we reacquired the lock
-                    log.debug("..but nothing available");
+                    log.trace("..but nothing available");
                     // loop back around again. If we've hit our timeout, we'll exit out of the loop.
                     continue;
                 }
@@ -172,54 +171,12 @@ public class BufferingResourceConstrainingQueue<T> extends ResourceConstrainingQ
         return null;
     }
 
-
-    /**
-     * must have lock before calling this method!
-     */
-    private void fillBufferIfEmpty(Optional<Long> timeoutNanos) throws InterruptedException {
-        if (buffer == null && timeoutNanos.orElse(1L) > 0) {
-            // we do this in a separate thread so that we can release our lock (via fillComplete.await()). That
-            // prevents this blocking poll() call from blocking other non-blocking reads.
-            fillThread.execute(() -> {
-                ReentrantLock lock = this.takeLock;
-                log.debug("Fill thread waiting for lock");
-                lock.lock();
-                log.debug("Fill thread acquired lock");
-                try {
-                    if (buffer == null) {
-                        log.debug("Fill thread: buffer empty, polling underlying queue");
-                        if (timeoutNanos.isPresent()) {
-                            buffer = delegate.poll(timeoutNanos.get(), TimeUnit.NANOSECONDS);
-                        } else {
-                            buffer = delegate.take();
-                        }
-                        log.debug("Fill thread: poll complete. Buffer is now {}", buffer);
-                    }
-                } catch (InterruptedException e) {
-                    // typically happens because we're shutting down. Release our lock and move on.
-                    log.warn("Interrupted while waiting to read from the underlying queue");
-                } finally {
-                    // whether it succeeded or not, wake somebody up to check on it.
-                    fillComplete.signal();
-                    lock.unlock();
-                }
-            });
-            // we don't just wait for the future, because we want to release our locks.
-            if (timeoutNanos.isPresent()) {
-                fillComplete.await(timeoutNanos.get(), TimeUnit.NANOSECONDS);
-            } else {
-                fillComplete.await();
-            }
-        }
-    }
-
     /**
      * must have lock before calling this method
      */
     private void fillBufferIfEmpty() {
         if (buffer == null) {
             buffer = delegate.poll();
-            fillComplete.signal();
         }
     }
 

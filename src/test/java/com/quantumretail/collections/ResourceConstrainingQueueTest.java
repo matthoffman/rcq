@@ -279,7 +279,7 @@ public class ResourceConstrainingQueueTest {
     }
 
     @Test
-    public void test_poll_doesnt_wait_for_take_unbuffered() throws ExecutionException, InterruptedException {
+    public void test_poll_doesnt_wait_for_take_unbuffered() throws ExecutionException, InterruptedException, TimeoutException {
        ExecutorService executorService = Executors.newCachedThreadPool();
        try {
            ConstantConstraintStrategy<Integer> strategy = new ConstantConstraintStrategy<>(true);
@@ -292,20 +292,17 @@ public class ResourceConstrainingQueueTest {
            Future<Integer> take = executorService.submit(q::take);
            Future<Integer> poll1 = executorService.submit((Callable<Integer>) q::poll);
            Future<Integer> poll2 = executorService.submit((Callable<Integer>) q::poll);
-           Thread.sleep(1000);
            assertFalse(take.isDone()); // should still be waiting
-           // note: currently, unbuffered mode doesn't handle blocking & nonblocking calls correctly.
-           assertTrue(poll1.isDone());
-           assertNull(poll1.get());
-           assertTrue(poll2.isDone());
-           assertNull(poll2.get());
+           assertNull(poll1.get(5, TimeUnit.SECONDS));
+           assertNull(poll2.get(5, TimeUnit.SECONDS));
+           assertFalse(take.isDone()); // should still be waiting
        } finally {
            executorService.shutdownNow();
        }
     }
 
     @Test
-    public void test_poll_doesnt_wait_for_take_buffered() throws ExecutionException, InterruptedException {
+    public void test_poll_doesnt_wait_for_take_buffered() throws ExecutionException, InterruptedException, TimeoutException {
         ExecutorService executorService = Executors.newCachedThreadPool();
         try {
             ConstantConstraintStrategy<Integer> strategy = new ConstantConstraintStrategy<>(true);
@@ -318,12 +315,11 @@ public class ResourceConstrainingQueueTest {
             Future<Integer> take = executorService.submit(q::take);
             Future<Integer> poll1 = executorService.submit((Callable<Integer>) q::poll);
             Future<Integer> poll2 = executorService.submit((Callable<Integer>) q::poll);
-            Thread.sleep(1000);
-            assertFalse(take.isDone()); // should still be waiting
-            assertTrue(poll1.isDone());
-            assertNull(poll1.get());
-            assertTrue(poll2.isDone());
-            assertNull(poll2.get());
+            assertFalse(take.isDone()); // take() should still be waiting
+            assertNull(poll1.get(5, TimeUnit.SECONDS));
+            assertNull(poll2.get(5, TimeUnit.SECONDS));
+
+            assertFalse(take.isDone()); // take() should still be waiting
         } finally {
             executorService.shutdownNow();
         }

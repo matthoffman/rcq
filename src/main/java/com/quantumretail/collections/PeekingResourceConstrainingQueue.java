@@ -24,12 +24,12 @@ import java.util.function.Supplier;
  * will return the same object. Of course, with multiple readers, this may well not be the case. Therefore, by default,
  * we have a global lock on reads:  each poll(), remove() or take() operation locks to try to ensure that a subsequent
  * peek() and take() returns the same object.
- *
+ * <p>
  * So, if there are other consumers of the underlying queue other than this class, peek() and poll() may return
  * different objects and we may return items we do not have the resources to handle.
  * Likewise, if the underlying queue implementation is distributed, such that there are multiple readers on this queue on
  * different JVMs, the same applies: we may return items that we do not have the resources to handle.
- *
+ * <p>
  * Thirdly, since peek() is non-blocking, blocking calls (poll(timeout), take()) are implemented with a polling loop, with a
  * poll frequency governed by the "retryFrequencyMS" constructor argument.
  * <p>
@@ -41,7 +41,7 @@ import java.util.function.Supplier;
  * item will be checked twice instead).
  * In some cases, that might be preferable to locking: if resources are generally homogeneous, and high throughput is
  * important, the cost of occasionally checking the wrong task may be acceptable. However, strict is "true" by default.
- *
+ * <p>
  * Another concurrency-related note:
  * <p>
  * If there are tasks available in the underlying queue, but we do not yet have the resources to hand them out, we do
@@ -49,6 +49,7 @@ import java.util.function.Supplier;
  * queue, but we are waiting to have the available resources to hand out the next task, which thread actually gets the
  * task when resources do become available is undefined. There is currently no "fair" mode for resource-contented waits.
  * <p>
+ *
  * @param <T>
  */
 public class PeekingResourceConstrainingQueue<T> extends ResourceConstrainingQueue<T> {
@@ -77,6 +78,7 @@ public class PeekingResourceConstrainingQueue<T> extends ResourceConstrainingQue
             }
             T nextItem = delegate.peek();
             if (nextItem == null) {
+                log.trace("peek returned nothing");
                 return onNoElementAvailable.get();
             } else if (shouldReturn(nextItem)) {
                 // note that if nextItem == null, remove() here will throw an exception.
@@ -84,6 +86,7 @@ public class PeekingResourceConstrainingQueue<T> extends ResourceConstrainingQue
                 // accessing this concurrently and strict == false!
                 // When strict == false, we're intentionally taking that risk to avoid locking.
                 T item = trackIfNecessary(delegate.poll());
+                log.debug("peek returned an item, but a subsequent poll did not");
                 if (item == null) return onNoElementAvailable.get();
                 else return item;
             } else {
@@ -104,23 +107,26 @@ public class PeekingResourceConstrainingQueue<T> extends ResourceConstrainingQue
         long totalSleepNanos = 0;
         long startNanos = System.nanoTime();
         long timeoutNanos = unit.toNanos(timeout);
+        long attempts = 0;
         // we treat "timeoutNanos < 0" as "no limit"
         while (timeoutNanos < 0 || totalSleepNanos < timeoutNanos) {
-            try {
-                return getItemNonBlocking(() -> {
-                    throw new NoSuchElementException();
-                }, (nextItem) -> {
-                    if (shouldFail(nextItem)) return failForTooMayTries(nextItem);
-                    else return null;
-                });
-            } catch (NoSuchElementException e) {
+            attempts++;
+            log.trace("attempt #{} to pull item from queue, ", attempts);
+            T item = getItemNonBlocking(
+                    () -> null,
+                    (nextItem) -> {
+                        if (shouldFail(nextItem)) return failForTooMayTries(nextItem);
+                        else return null;
+                    });
+            if (item == null) {
+                log.trace("attempt #{}: Nothing available", attempts);
                 // alas, either nothing available or we don't have the resources to execute it. Sleep, and try again.
                 // sleep and retry
                 sleep();
                 totalSleepNanos = System.nanoTime() - startNanos;
             }
         }
-        // if we got here, we timed out.
+        // if we got here, we timed out without finding an item.
         return null;
     }
 }
