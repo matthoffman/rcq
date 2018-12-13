@@ -25,6 +25,12 @@ import static com.codahale.metrics.MetricRegistry.name;
  * <p/>
  *
  * This class has 3 distinct modes of operation, which represent different tradeoffs in the face of concurrent access.
+ * "buffered mode" will hold at most one item in an internal "buffer" until we have the resources available to execute
+ * it. Since that item has been removed from the underlying queue, underlying queues that have durability or HA
+ * guarantees may consider that item "done" and stop tracking it, thus leaving the possibility that the task is lost
+ *
+ * Items will only be buffered in response to a read operation (we don't eagerly fetch from the underlying queue) and
+ * only when the resource constraint check fails for that item.
  *
  * Concurrency notes:
  * There are several important concurrency-related issues to keep in mind when using ResourceConstrainingQueue.
